@@ -1,0 +1,78 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+/coverage/
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release
+
+# ==============================
+# AI小芒 专用忽略规则
+# ==============================
+
+# 密钥文件（严禁提交）
+.env
+.env.local
+.env.*.local
+
+# 模型文件（大体积，禁止提交）
+assets/*.tflite
+assets/*.gguf
+assets/*.bin
+
+# 后端 Python 虚拟环境
+backend/__pycache__/
+backend/.venv/
+backend/*.pyc
+
+# Flutter iOS build
+/ios/Runner/Flutter/*.xcstate
+/ios/.symlinks/
+
+# macOS
+*.dSYM/
+
+# Cursor Agent（禁止提交）
+.cursor/
+agent-transcripts/
+
+# IDE终端状态文件
+terminal-*.json
+logs/
+
+# IntelliJ module files
+ai_video.iml
+android/ai_video_android.iml

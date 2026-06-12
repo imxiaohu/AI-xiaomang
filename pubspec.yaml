@@ -1,0 +1,51 @@
+name: ai_video
+description: AI Visual Conversation Assistant - AI小芒视觉对话助手
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.2.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # 硬件权限
+  permission_handler: ^11.3.0
+
+  # 音视频采集
+  camera: ^0.11.0+2
+
+  # 音频播放（阿里云MP3流式播放）
+  audioplayers: ^6.0.0
+
+  # TTS（离线模式本地播报）
+  flutter_tts: ^4.0.2
+
+  # 状态管理
+  provider: ^6.1.2
+
+  # UI磨砂玻璃
+  glassmorphism: ^3.0.0
+
+  # 网络（SSE + HTTP上行分片）
+  http: ^1.2.1
+
+  # 网络状态检测
+  connectivity_plus: ^6.0.0
+
+  # 图像压缩
+  image: ^4.1.0
+
+  # 路径读写（模型文件、缓存）
+  path_provider: ^2.1.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/
