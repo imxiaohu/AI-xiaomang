@@ -1,4 +1,4 @@
-"""SSE路由：文本分片 + MP3音频分片 + 心跳推送"""
+"""SSE路由：文本分片 + MP3音频分片 + Omni PCM音频 + 心跳推送"""
 import asyncio
 import json
 import base64
@@ -6,7 +6,7 @@ from typing import AsyncGenerator
 from fastapi import APIRouter, Query, HTTPException
 from fastapi.responses import StreamingResponse
 from sse_starlette.sse import EventSourceResponse
-from config import SSE_HEARTBEAT_INTERVAL, DEBUG, DASHSCOPE_API_KEY
+from config import SSE_HEARTBEAT_INTERVAL, DEBUG, DASHSCOPE_API_KEY, OMNI_MODE
 from services.session_manager import session_manager
 from services.aliyun_vl import AliyunVL
 from services.aliyun_tts import AliyunTTS
@@ -20,7 +20,8 @@ router = APIRouter(prefix="/sse", tags=["sse"])
 async def sse_event_stream(ctx_id: str, token: str) -> AsyncGenerator[dict, None]:
     """
     SSE事件流生成器
-    事件类型：text / audio / end / heartbeat / error / quota_exceeded
+    事件类型（VL+TTS模式）：text / audio / end / heartbeat / error / quota_exceeded
+    事件类型（Omni模式）：omni_audio / omni_speech_started / omni_speech_stopped / text / end / heartbeat / error
     """
     is_valid, err_msg = validate_session_params(ctx_id, token)
     if not is_valid:
@@ -33,6 +34,7 @@ async def sse_event_stream(ctx_id: str, token: str) -> AsyncGenerator[dict, None
         return
 
     sse_queue: asyncio.Queue[dict] = asyncio.Queue()
+    session.sse_queue = sse_queue
 
     async def heartbeat():
         while True:
@@ -44,26 +46,30 @@ async def sse_event_stream(ctx_id: str, token: str) -> AsyncGenerator[dict, None
 
     heartbeat_task = asyncio.create_task(heartbeat())
 
-    async def run_inference():
-        await trigger_session_inference(session, ctx_id)
+    # Omni 模式：不在此处启动推理，等 upload/chat/end 触发
+    inference_task: asyncio.Task | None = None
+    if not OMNI_MODE:
+        async def run_inference():
+            await trigger_session_inference(session, ctx_id)
 
-    inference_task = asyncio.create_task(run_inference())
-    session.sse_queue = sse_queue
-    session.inference_task = inference_task
+        inference_task = asyncio.create_task(run_inference())
+        session.inference_task = inference_task
 
     try:
         while True:
             event = await sse_queue.get()
             yield event
     except asyncio.CancelledError:
-        inference_task.cancel()
+        if inference_task:
+            inference_task.cancel()
         raise
     finally:
         heartbeat_task.cancel()
-        try:
-            await inference_task
-        except asyncio.CancelledError:
-            pass
+        if inference_task:
+            try:
+                await inference_task
+            except asyncio.CancelledError:
+                pass
 
 
 def _split_sentences_for_sse(text: str) -> list[str]:
