@@ -96,8 +96,10 @@ class AppState extends ChangeNotifier {
   // ==============================
   double _modelLoadProgress = 0;
   bool _modelLoaded = false;
+  bool _simulationMode = false;
   double get modelLoadProgress => _modelLoadProgress;
   bool get modelLoaded => _modelLoaded;
+  bool get simulationMode => _simulationMode;
 
   // ==============================
   // 网络
@@ -191,6 +193,7 @@ class AppState extends ChangeNotifier {
     };
     await _offlineEngine!.init(_hardwareInfo);
     _modelLoaded = _offlineEngine!.isWhisperReady;
+    _simulationMode = _offlineEngine!.isSimulationMode;
     _modelLoadProgress = 1.0;
     notifyListeners();
   }

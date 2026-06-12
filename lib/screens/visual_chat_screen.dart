@@ -75,6 +75,7 @@ class _VisualChatScreenState extends State<VisualChatScreen>
                   connectionStatus: appState.connectionStatus,
                   modelLoadProgress:
                       appState.modelLoaded ? -1 : appState.modelLoadProgress,
+                  simulationMode: appState.simulationMode,
                   onToggleFlash: appState.toggleFlash,
                   onSwitchCamera: appState.switchCamera,
                 ),

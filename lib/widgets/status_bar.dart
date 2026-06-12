@@ -8,6 +8,7 @@ class StatusBar extends StatelessWidget {
   final bool flashOn;
   final ConnectionStatus connectionStatus;
   final double modelLoadProgress; // 0.0~1.0，-1表示不显示
+  final bool simulationMode; // 模型未集成，显示警告
   final VoidCallback onToggleFlash;
   final VoidCallback onSwitchCamera;
 
@@ -17,6 +18,7 @@ class StatusBar extends StatelessWidget {
     required this.flashOn,
     required this.connectionStatus,
     this.modelLoadProgress = -1,
+    this.simulationMode = false,
     required this.onToggleFlash,
     required this.onSwitchCamera,
   });
@@ -26,32 +28,41 @@ class StatusBar extends StatelessWidget {
     final topPadding = MediaQuery.of(context).padding.top;
     return Padding(
       padding: EdgeInsets.only(top: topPadding + 8, left: 12, right: 12),
-      child: Row(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // 左侧：模式标签 + 连接状态
-          _buildModeTag(),
-          const SizedBox(width: 8),
-          _buildConnectionIndicator(),
-          // 中间：模型加载进度
-          if (modelLoadProgress >= 0 && modelLoadProgress < 1.0) ...[
-            const SizedBox(width: 12),
-            Expanded(child: _buildProgressBar()),
-          ] else
-            const Spacer(),
-          // 右侧：闪光灯 + 翻转摄像头
+          // 模拟模式警告条
+          if (simulationMode) _buildSimulationWarning(),
+          // 主状态栏
           Row(
-            mainAxisSize: MainAxisSize.min,
             children: [
-              _buildCircleIcon(
-                icon: flashOn ? Icons.flash_on : Icons.flash_off,
-                color: flashOn ? Colors.amber : Colors.white54,
-                onTap: onToggleFlash,
-              ),
+              // 左侧：模式标签 + 连接状态
+              _buildModeTag(),
               const SizedBox(width: 8),
-              _buildCircleIcon(
-                icon: Icons.flip_camera_ios,
-                color: Colors.white,
-                onTap: onSwitchCamera,
+              _buildConnectionIndicator(),
+              // 中间：模型加载进度
+              if (modelLoadProgress >= 0 && modelLoadProgress < 1.0) ...[
+                const SizedBox(width: 12),
+                Expanded(child: _buildProgressBar()),
+              ] else
+                const Spacer(),
+              // 右侧：闪光灯 + 翻转摄像头
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _buildCircleIcon(
+                    icon: flashOn ? Icons.flash_on : Icons.flash_off,
+                    color: flashOn ? Colors.amber : Colors.white54,
+                    onTap: onToggleFlash,
+                  ),
+                  const SizedBox(width: 8),
+                  _buildCircleIcon(
+                    icon: Icons.flip_camera_ios,
+                    color: Colors.white,
+                    onTap: onSwitchCamera,
+                  ),
+                ],
               ),
             ],
           ),
@@ -117,6 +128,28 @@ class StatusBar extends StatelessWidget {
         backgroundColor: Colors.white24,
         valueColor: const AlwaysStoppedAnimation(Color(0xff635bff)),
         minHeight: 4,
+      ),
+    );
+  }
+
+  Widget _buildSimulationWarning() {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: Colors.orange.withValues(alpha: 0.85),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: const Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.warning_amber_rounded, color: Colors.white, size: 14),
+          SizedBox(width: 4),
+          Text(
+            '离线模式：模型未集成，仅模拟对话',
+            style: TextStyle(color: Colors.white, fontSize: 11),
+          ),
+        ],
       ),
     );
   }

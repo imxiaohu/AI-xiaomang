@@ -17,6 +17,8 @@ class OfflineAIEngine {
   bool _vlReady = false;
   bool _whisperRunning = false;
   bool _vlRunning = false;
+  bool _simulationMode = false; // 模型未加载，进入模拟对话模式
+  bool get isSimulationMode => _simulationMode;
 
   HardwareInfo? _hardwareInfo;
   Interpreter? _whisperInterpreter;
@@ -68,6 +70,7 @@ class OfflineAIEngine {
 
       if (modelPath == null) {
         debugPrint('[OfflineAIEngine] Whisper model not found, simulation mode');
+        _simulationMode = true;
         _whisperReady = true;
         onModelLoadProgress?.call(1.0);
         return;
@@ -96,11 +99,13 @@ class OfflineAIEngine {
         debugPrint('[OfflineAIEngine] Whisper-tiny loaded successfully');
       } catch (e, st) {
         debugPrint('[OfflineAIEngine] TFLite load error: $e\n$st');
+        _simulationMode = true;
         _whisperReady = true;
         onModelLoadProgress?.call(1.0);
       }
     } catch (e) {
       debugPrint('[OfflineAIEngine] Whisper load error: $e');
+      _simulationMode = true;
       _whisperReady = true;
       onModelLoadProgress?.call(1.0);
     }
@@ -138,6 +143,7 @@ class OfflineAIEngine {
       final modelPath = await _getModelPath('models/Qwen2-VL-2B-Q4_K_M.gguf');
       if (modelPath == null) {
         debugPrint('[OfflineAIEngine] VL model not found, simulation mode');
+        _simulationMode = true;
         _vlReady = true;
         onModelLoadProgress?.call(1.0);
         return;
@@ -158,12 +164,14 @@ class OfflineAIEngine {
         _vlReady = true;
       } catch (e) {
         debugPrint('[OfflineAIEngine] VL load error: $e, simulation mode');
+        _simulationMode = true;
         _vlReady = true;
       }
 
       onModelLoadProgress?.call(1.0);
     } catch (e) {
       debugPrint('[OfflineAIEngine] VL load error: $e, simulation mode');
+      _simulationMode = true;
       _vlReady = true;
       onModelLoadProgress?.call(1.0);
     }
