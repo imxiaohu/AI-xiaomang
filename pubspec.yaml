@@ -40,6 +40,13 @@ dependencies:
   # 路径读写（模型文件、缓存）
   path_provider: ^2.1.3
 
+  # 端侧AI推理
+  tflite_flutter: ^0.12.1
+  llama_cpp_dart: ^0.2.2
+
+  # 音频录制（16KHz PCM）
+  record: ^5.0.4
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

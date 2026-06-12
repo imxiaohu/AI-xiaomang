@@ -15,6 +15,7 @@ class VideoCaptureService {
   Timer? _captureTimer;
   bool _isCapturing = false;
   int _frameIndex = 0;
+  Uint8List? _latestFrame;
 
   static const int _captureIntervalMs = 800;
   static const int _targetWidth = 640;
@@ -74,6 +75,7 @@ class VideoCaptureService {
     _isCapturing = false;
     _captureTimer?.cancel();
     _captureTimer = null;
+    _latestFrame = null;
   }
 
   /// 切换前后摄像头
@@ -128,6 +130,7 @@ class VideoCaptureService {
       );
 
       onFrameCaptured?.call(compressed);
+      _latestFrame = compressed;
       await _uploadFrame(compressed);
     } catch (e) {
       // 单帧失败不中断抽帧
@@ -150,6 +153,9 @@ class VideoCaptureService {
       client.close();
     } catch (_) {}
   }
+
+  /// 最新一帧的JPG数据（供离线VL推理使用）
+  Uint8List? getLatestFrame() => _latestFrame;
 
   CameraController? get controller => _controller;
 

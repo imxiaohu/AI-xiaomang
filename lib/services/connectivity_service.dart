@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:flutter/foundation.dart' show VoidCallback;
 
 /// 网络连接状态
 enum NetworkStatus {
@@ -69,5 +70,3 @@ class ConnectivityService {
     _subscription?.cancel();
   }
 }
-
-typedef VoidCallback = void Function();

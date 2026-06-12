@@ -1,14 +1,17 @@
 import 'package:flutter_tts/flutter_tts.dart';
+import 'package:flutter/foundation.dart';
 
-/// TTS服务封装
-/// 用于离线模式本地语音播报
-class TtsService {
-  final FlutterTts _tts = FlutterTts();
-  bool _isInitialized = false;
-  bool _isSpeaking = false;
+  /// TTS服务封装
+  /// 用于离线模式本地语音播报
+  class TtsService {
+    final FlutterTts _tts = FlutterTts();
+    bool _isInitialized = false;
+    bool _isSpeaking = false;
 
-  Function(bool speaking)? onStateChanged;
-  Function(double volume)? onVolumeChanged;
+    Function(bool speaking)? onStateChanged;
+    Function(double volume)? onVolumeChanged;
+    /// 播报完成的回调（由 AppState.startSpeaking 注册）
+    VoidCallback? onSpeakComplete;
 
   /// 初始化
   Future<void> init() async {
@@ -27,6 +30,7 @@ class TtsService {
     _tts.setCompletionHandler(() {
       _isSpeaking = false;
       onStateChanged?.call(false);
+      onSpeakComplete?.call();
     });
     _tts.setCancelHandler(() {
       _isSpeaking = false;

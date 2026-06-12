@@ -14,10 +14,18 @@ class Session:
         self.last_active = time.time()
         # 对话上下文：list of {"role": "user"/"assistant", "content": str}
         self.messages: list[dict[str, str]] = []
-        # 当前推理轮次（用于判断是否结束）
-        self.turn_active = False
-        # SSE队列（多个）
-        self.sse_queues: list = []
+    # 当前推理轮次（用于判断是否结束）
+    self.turn_active = False
+    # SSE队列
+    self.sse_queue = None
+    # 音频分片缓冲区（upload.py 写入，推理时消耗）
+    self.audio_buffer: list[str] = []
+    # 图像帧缓冲区（upload.py 写入，供 VL 推理）
+    self.frame_buffer: list[dict] = []
+    # 用户 ASR 转写文本（/chat/infer 调用时写入）
+    self.transcribed_text: str = ""
+    # 当前推理任务（用于取消旧推理）
+    self.inference_task = None
 
     def touch(self):
         self.last_active = time.time()

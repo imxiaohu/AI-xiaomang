@@ -197,9 +197,9 @@ class _Enhanced3DBallState extends State<_Enhanced3DBall>
             children: [
               // 波纹（listening状态）
               if (widget.status == AiStatus.listening) ...[
-                _Ripple(index: 0, color: const Color(0xff86f0c6)),
-                _Ripple(index: 1, color: const Color(0xff86f0c6)),
-                _Ripple(index: 2, color: const Color(0xff86f0c6)),
+                const _Ripple(index: 0, color: Color(0xff86f0c6)),
+                const _Ripple(index: 1, color: Color(0xff86f0c6)),
+                const _Ripple(index: 2, color: Color(0xff86f0c6)),
               ],
               // 光晕（thinking状态）
               if (widget.status == AiStatus.thinking)

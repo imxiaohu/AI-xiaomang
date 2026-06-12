@@ -38,9 +38,10 @@ class _VisualChatScreenState extends State<VisualChatScreen>
     final appState = context.read<AppState>();
     if (state == AppLifecycleState.paused) {
       // 切后台：停止摄像头抽帧，仅维持麦克风收音
-      appState.cameraController;
+      appState.pauseFrameCapture();
     } else if (state == AppLifecycleState.resumed) {
       // 切前台：恢复抽帧
+      appState.resumeFrameCapture();
     }
   }
 
@@ -81,7 +82,7 @@ class _VisualChatScreenState extends State<VisualChatScreen>
 
               // === 悬浮AI球体 ===
               Positioned(
-                top: MediaQuery.of(context).size.height * 0.48,
+                top: MediaQuery.of(context).size.height * 0.52,
                 left: 0,
                 right: 0,
                   child: Center(
@@ -138,7 +139,7 @@ class _VisualChatScreenState extends State<VisualChatScreen>
       top: 0,
       left: 0,
       right: 0,
-      height: MediaQuery.of(context).size.height * 0.72,
+      height: MediaQuery.of(context).size.height * 0.70,
       child: Container(
         margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
         child: ClipRRect(

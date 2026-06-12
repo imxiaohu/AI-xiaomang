@@ -47,6 +47,7 @@ app.*.map.json
 .env
 .env.local
 .env.*.local
+backend/.env
 
 # 模型文件（大体积，禁止提交）
 assets/*.tflite

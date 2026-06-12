@@ -35,6 +35,8 @@ FastAPI（Python）
 
 ## 依赖列表
 
+### Flutter 客户端（pubspec.yaml）
+
 | 依赖 | 版本 | 用途 |
 |------|------|------|
 | `camera` | ^0.11.0+2 | 摄像头预览 |
@@ -50,7 +52,22 @@ FastAPI（Python）
 | `tflite_flutter` | ^0.10.4 | Whisper 端侧推理（TFLite） |
 | `llama_cpp_dart` | ^0.1.10 | Qwen-VL 端侧推理（GGUF） |
 
-> 原创功能：全部业务逻辑代码均为自主实现，第三方依赖如上所列。
+### FastAPI 后端（backend/requirements.txt）
+
+| 依赖 | 版本 | 用途 |
+|------|------|------|
+| `fastapi` | >=0.110.0 | Web 框架 |
+| `uvicorn[standard]` | >=0.29.0 | ASGI 服务器 |
+| `sse-starlette` | >=1.8.0 | SSE 事件流支持 |
+| `python-multipart` | >=0.0.9 | HTTP 文件上传 |
+| `websockets` | >=12.0 | 阿里云 ASR WebSocket |
+| `aliyun-python-sdk-core` | >=2.15.0 | 阿里云 SDK |
+| `python-dotenv` | >=1.0.0 | .env 环境变量加载 |
+| `httpx` | >=0.27.0 | 阿里云 API HTTP 调用 |
+| `pydantic` | >=2.0.0 | 数据校验 |
+
+> **原创声明**：全部业务逻辑代码均为自主实现，第三方依赖如上两表所列。
+> 如复用第三方库或框架（如 Flask Blueprint、flutter_3d_obj），需在 PR 描述中说明原创功能部分。
 
 ## 环境要求
 

@@ -14,6 +14,8 @@ pluginManagement {
         google()
         mavenCentral()
         gradlePluginPortal()
+        // Google AI Edge (LiteRT / MediaPipe) native 库仓库
+        maven { url = uri("https://storage.googleapis.com/maven.google.com/") }
     }
 }
 

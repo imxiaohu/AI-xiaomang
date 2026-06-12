@@ -1,21 +1,20 @@
 """SSE路由：文本分片 + MP3音频分片 + 心跳推送"""
 import asyncio
 import json
-import uuid
+import base64
 from typing import AsyncGenerator
 from fastapi import APIRouter, Query, HTTPException
 from fastapi.responses import StreamingResponse
 from sse_starlette.sse import EventSourceResponse
-from config import SSE_HEARTBEAT_INTERVAL
+from config import SSE_HEARTBEAT_INTERVAL, DEBUG, ALIYUN_ASR_APP_KEY
 from services.session_manager import session_manager
-from services.aliyun_asr import AliyunASR
 from services.aliyun_vl import AliyunVL
 from services.aliyun_tts import AliyunTTS
+from services.aliyun_asr import AliyunASR
+
+from utils.cors import build_sse_headers, validate_session_params
 
 router = APIRouter(prefix="/sse", tags=["sse"])
-
-# 每个会话的ASR实例
-_asr_instances: dict[str, AliyunASR] = {}
 
 
 async def sse_event_stream(ctx_id: str, token: str) -> AsyncGenerator[dict, None]:
@@ -23,45 +22,215 @@ async def sse_event_stream(ctx_id: str, token: str) -> AsyncGenerator[dict, None
     SSE事件流生成器
     事件类型：text / audio / end / heartbeat / error / quota_exceeded
     """
+    is_valid, err_msg = validate_session_params(ctx_id, token)
+    if not is_valid:
+        yield {"event": "error", "data": json.dumps({"code": "invalid_params", "message": err_msg})}
+        return
+
     session = await session_manager.get(ctx_id)
     if not session:
         yield {"event": "error", "data": json.dumps({"code": "invalid_session", "message": "会话不存在或已过期"})}
         return
 
-    asr = AliyunASR()
-    _asr_instances[ctx_id] = asr
+    sse_queue: asyncio.Queue[dict] = asyncio.Queue()
 
-    # 注册文本回调
-    async def on_asr_text(text: str):
-        await sse_queue.put({"event": "text", "data": json.dumps({"text": text, "is_final": False})})
-
-    try:
-        await asr.connect(on_asr_text)
-    except Exception as e:
-        yield {"event": "error", "data": json.dumps({"code": "asr_connect", "message": str(e)})}
-
-    # SSE队列
-    sse_queue = asyncio.Queue()
-    session.sse_queues.append(sse_queue)
-
-    # 心跳任务
     async def heartbeat():
         while True:
             await asyncio.sleep(SSE_HEARTBEAT_INTERVAL)
-            await sse_queue.put({"event": "heartbeat", "data": "ping"})
+            try:
+                await asyncio.wait_for(sse_queue.put({"event": "heartbeat", "data": "ping"}), timeout=1.0)
+            except asyncio.TimeoutError:
+                pass
 
     heartbeat_task = asyncio.create_task(heartbeat())
+
+    async def run_inference():
+        await trigger_session_inference(session, ctx_id)
+
+    inference_task = asyncio.create_task(run_inference())
+    session.sse_queue = sse_queue
+    session.inference_task = inference_task
 
     try:
         while True:
             event = await sse_queue.get()
             yield event
     except asyncio.CancelledError:
-        pass
+        inference_task.cancel()
+        raise
     finally:
         heartbeat_task.cancel()
+        try:
+            await inference_task
+        except asyncio.CancelledError:
+            pass
+
+
+def _split_sentences_for_sse(text: str) -> list[str]:
+    """将文本拆分为适合SSE推送的片段（按句子或固定长度）"""
+    import re
+    sentences = re.split(r'(?<=[。！？.!?])', text)
+    result = []
+    current = ""
+    for s in sentences:
+        if len(current) + len(s) > 50:
+            if current:
+                result.append(current.strip())
+            current = s
+        else:
+            current += s
+    if current.strip():
+        result.append(current.strip())
+    return result if result else [text]
+
+
+def _mock_vl_response(question: str) -> str:
+    """开发模式Mock VL回答"""
+    responses = [
+        "我看到这是一个室内的场景，光线充足。",
+        "根据画面分析，这似乎是一个现代化的空间。",
+        "从视觉角度来看，画面中的内容非常清晰。",
+        "我注意到画面中有一些有趣的元素，让我为你描述一下。",
+    ]
+    return responses[hash(question) % len(responses)]
+
+
+def _mock_text_response(question: str) -> str:
+    """开发模式Mock纯文本回答"""
+    return f"我听到了你的问题：{question}。当前运行在开发模式，使用模拟回答。阿里云凭证配置完成后将启用真实AI推理。"
+
+
+async def trigger_session_inference(session, ctx_id: str):
+    """
+    共享推理函数：被 SSE 事件流、/chat/infer、/upload/chat/end 调用。
+    从 session 取出音频/帧/文本，执行 VL 推理 + TTS 合成，结果写入 session.sse_queue。
+    """
+    sse_queue = session.sse_queue
+    if sse_queue is None:
+        sse_queue = asyncio.Queue()
+        session.sse_queue = sse_queue
+
+    if session.inference_task and not session.inference_task.done():
+        session.inference_task.cancel()
+        try:
+            await session.inference_task
+        except asyncio.CancelledError:
+            pass
+
+    try:
+        vl = AliyunVL()
+        tts = AliyunTTS()
+
+        user_text = session.transcribed_text
+        if not user_text and session.audio_buffer:
+            user_text = await _do_backend_asr(session)
+
+        if not user_text:
+            user_text = "你好"
+
+        frame_data = session.frame_buffer[-1] if session.frame_buffer else None
+        context = session.get_context()
+
+        if vl.is_configured and frame_data:
+            try:
+                if DEBUG:
+                    full_text = _mock_vl_response(user_text)
+                else:
+                    full_text = await vl.chat_with_image(
+                        image_base64=frame_data["frame"],
+                        prompt=user_text,
+                        context=context,
+                    )
+            except Exception as e:
+                full_text = f"视觉理解服务异常：{e}"
+        else:
+            full_text = _mock_text_response(user_text)
+
+        session.add_message("user", user_text)
+        session.add_message("assistant", full_text)
+        session.transcribed_text = ""
+        session.touch()
+
+        for sent in _split_sentences_for_sse(full_text):
+            await sse_queue.put({
+                "event": "text",
+                "data": json.dumps({"text": sent, "is_final": False}),
+            })
+            await asyncio.sleep(0.05)
+
+        if tts.check_quota():
+            audio_index = 0
+            try:
+                if not DEBUG:
+                    async def on_tts_chunk(mp3_base64: str, idx: int):
+                        nonlocal audio_index
+                        audio_index = idx
+                        await sse_queue.put({
+                            "event": "audio",
+                            "data": json.dumps({"audio": mp3_base64, "index": idx}),
+                        })
+                    await tts.synthesize_stream(full_text, on_tts_chunk)
+                    total_chunks = audio_index + 1
+                else:
+                    total_chunks = 0
+            except Exception as e:
+                print(f"[SSE] TTS error: {e}")
+                total_chunks = 0
+        else:
+            total_chunks = 0
+            await sse_queue.put({
+                "event": "quota_exceeded",
+                "data": json.dumps({"reason": "Daily TTS quota exceeded"}),
+            })
+
+        await sse_queue.put({
+            "event": "end",
+            "data": json.dumps({"full_text": full_text, "total_audio_chunks": total_chunks}),
+        })
+
+        session.audio_buffer.clear()
+        session.turn_active = False
+
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        print(f"[SSE] Inference error: {e}")
+        try:
+            await sse_queue.put({
+                "event": "error",
+                "data": json.dumps({"code": "inference_error", "message": str(e)}),
+            })
+        except Exception:
+            pass
+
+
+async def _do_backend_asr(session) -> str:
+    """
+    若客户端未做 ASR（session.transcribed_text 为空），
+    则从 session.audio_buffer 合并 PCM，调用阿里云 ASR 识别。
+    """
+    if not ALIYUN_ASR_APP_KEY:
+        return ""
+
+    try:
+        combined_pcm = b"".join(base64.b64decode(chunk) for chunk in session.audio_buffer)
+        transcribed = ""
+
+        asr = AliyunASR()
+
+        async def on_text(text: str):
+            nonlocal transcribed
+            transcribed = text
+
+        await asr.connect(on_text)
+        await asr.send_audio_raw(combined_pcm)
+        await asyncio.sleep(5)
         await asr.close()
-        _asr_instances.pop(ctx_id, None)
+
+        return transcribed
+    except Exception as e:
+        print(f"[SSE] Backend ASR failed: {e}")
+        return ""
 
 
 @router.get("/chat")
@@ -71,7 +240,6 @@ async def sse_chat(
 ):
     """
     SSE下行流接口
-
     URL参数携带鉴权（避免SSE跨域自定义Header问题）
     SSE响应头必须设置：Content-Type: text/event-stream, Cache-Control: no-cache, X-Accel-Buffering: no
     """
@@ -81,10 +249,27 @@ async def sse_chat(
 
     return EventSourceResponse(
         event_generator(),
-        headers={
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-            "Access-Control-Allow-Origin": "*",
-        },
+        headers=build_sse_headers(),
     )
+
+
+@router.post("/chat/infer")
+async def trigger_inference(
+    ctxId: str = Query(..., description="会话ID"),
+    userText: str = Query(..., description="用户语音转写文本"),
+):
+    """
+    手动触发推理（当客户端使用自有ASR时调用）
+    从 session 取出最近帧和文本，触发VL+TTS推理并通过SSE推送
+    """
+    session = await session_manager.get(ctxId)
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    if session.inference_task and not session.inference_task.done():
+        session.inference_task.cancel()
+
+    session.transcribed_text = userText
+    session.inference_task = asyncio.create_task(trigger_session_inference(session, ctxId))
+
+    return {"code": 0, "message": "inference_triggered"}

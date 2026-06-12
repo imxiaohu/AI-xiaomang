@@ -48,6 +48,13 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+
+        <!-- 前台音频保活服务 -->
+        <service
+            android:name=".AudioForegroundService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
     </application>
     <queries>
         <intent>

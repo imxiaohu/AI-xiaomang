@@ -8,6 +8,8 @@ android {
     namespace = "com.example.ai_video"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
+    // tflite_flutter 0.12.1 (LiteRT 1.4.0) 需要 compileSdk 36+
+    // flutter.compileSdkVersion 在 Flutter 3.41 中为 36，满足要求
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

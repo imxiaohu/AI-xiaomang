@@ -12,6 +12,7 @@ import '../services/connectivity_service.dart';
 import '../services/offline_ai_engine.dart';
 import '../services/background_audio_service.dart';
 import '../utils/tts_service.dart';
+import '../config/env_config.dart';
 
 /// 全局业务状态编排
 /// 管理：SSE连接生命周期、录音/抽帧/推理/播报时序、自动降级触发
@@ -241,9 +242,9 @@ class AppState extends ChangeNotifier {
       _sessionId = DateTime.now().millisecondsSinceEpoch.toString();
     }
     _sseService = SseStreamService(
-      baseUrl: 'http://localhost:8000',
+      baseUrl: BackendConfig.baseUrl,
       sessionId: _sessionId,
-      token: 'dev_token',
+      token: BackendConfig.defaultToken,
     );
     _sseService!.onConnected = () {
       _connectionStatus = ConnectionStatus.connected;
@@ -318,7 +319,7 @@ class AppState extends ChangeNotifier {
     _resetIdleTimer();
     notifyListeners();
 
-    // 启动录音
+    // 启动录音（云端上传分片，离线本地识别）
     _audioRecorder?.startRecording();
 
     // 启动抽帧（云端模式）
@@ -358,25 +359,35 @@ class AppState extends ChangeNotifier {
 
   void _processInference() async {
     if (_runMode == AppRunMode.cloudAliyun) {
-      // 云端推理（通过SSE接收流式结果）
+      // 云端推理：通过SSE接收流式结果
       _sseService?.endTurn();
       // 等待SSE推送（thinking状态保持）
+      // 用户提问文本在SSE onText -> currentStreamingText -> addAiMessage 中处理
     } else {
       // 离线推理：Whisper ASR + Qwen-VL 视觉理解 + 本地回答
       try {
-        // 获取最新录制的PCM数据（由audio_recorder_service提供）
-        // 此处从最近一条用户消息获取识别文本作为占位
-        final userMsg = _messages.where((m) => m.isUser).lastOrNull;
-        final userText = userMsg?.text ?? '你好';
+        // 第一步：从录音服务获取最新PCM数据，Whisper ASR识别
+        final pcmData = await _audioRecorder?.getLatestPcmData();
+        String userText;
+        if (pcmData != null && pcmData.isNotEmpty) {
+          userText = await _offlineEngine!.recognizeSpeech(pcmData);
+        } else {
+          userText = '你好';
+        }
 
-        // 调用离线引擎进行视觉+语言推理
+        // 第二步：将用户提问存入消息列表（显示在ChatPanel）
+        addUserMessage(userText);
+
+        // 第三步：从视频捕获获取最新帧，Qwen-VL视觉推理
         String answer;
         if (_offlineEngine?.isVLReady == true) {
-          // 有视觉模型时进行图文理解
-          // 注意：实际应从最新抽帧获取图像bytes
-          answer = await _offlineEngine!.chat(userText);
+          final frameBytes = _videoCapture?.getLatestFrame();
+          if (frameBytes != null && frameBytes.isNotEmpty) {
+            answer = await _offlineEngine!.understandImage(frameBytes, userText);
+          } else {
+            answer = await _offlineEngine!.chat(userText);
+          }
         } else {
-          // 无视觉模型时纯语音对话
           answer = await _offlineEngine!.chat(userText);
         }
 
@@ -405,6 +416,7 @@ class AppState extends ChangeNotifier {
       _backgroundService?.start();
       final lastAiMsg = _messages.lastOrNull;
       if (lastAiMsg != null) {
+        _ttsService?.onSpeakComplete = () => goIdle();
         _ttsService?.speak(lastAiMsg.text);
       }
     }
@@ -449,13 +461,13 @@ class AppState extends ChangeNotifier {
     notifyListeners();
     if (granted) {
       _audioRecorder = AudioRecorderService(
-        baseUrl: 'http://localhost:8000',
+        baseUrl: BackendConfig.baseUrl,
         sessionId: _sessionId,
       );
     }
     if (granted && _cameraPermissionGranted) {
       _videoCapture = VideoCaptureService(
-        baseUrl: 'http://localhost:8000',
+        baseUrl: BackendConfig.baseUrl,
         sessionId: _sessionId,
       );
       _videoCapture!.init(_cameras);
@@ -476,6 +488,19 @@ class AppState extends ChangeNotifier {
     if (_aiStatus == AiStatus.listening) return;
     await _videoCapture?.switchCamera(_cameras);
     notifyListeners();
+  }
+
+  // ==============================
+  // 生命周期：抽帧控制
+  // ==============================
+  void pauseFrameCapture() {
+    _videoCapture?.stopCapture();
+  }
+
+  void resumeFrameCapture() {
+    if (_runMode == AppRunMode.cloudAliyun) {
+      _videoCapture?.startCapture();
+    }
   }
 
   // ==============================

@@ -43,6 +43,8 @@ class SseStreamService {
     required this.token,
   });
 
+  String _sseBuffer = '';
+
   /// 连接SSE
   Future<void> connect() async {
     if (_disposed) return;
@@ -76,11 +78,32 @@ class SseStreamService {
   }
 
   void _handleData(String raw) {
-    // 解析SSE格式：event: type\ndata: payload\n\n
-    final lines = raw.split('\n');
+    // 任何数据都重置超时计时器
+    _lastDataTime = DateTime.now();
+
+    _sseBuffer += raw;
+    while (true) {
+      final eom = _sseBuffer.indexOf('\n\n');
+      if (eom == -1) {
+        // 可能还有不完整的行（以单个\n结尾），检查是否需要等待更多数据
+        if (_sseBuffer.contains('\n')) {
+          // 有不完整的行，但还没遇到空行，继续累积
+          break;
+        }
+        break;
+      }
+      final eventText = _sseBuffer.substring(0, eom);
+      _sseBuffer = _sseBuffer.substring(eom + 2);
+      _parseEvent(eventText);
+    }
+  }
+
+  void _parseEvent(String eventText) {
+    // 解析单个SSE事件：event: type\ndata: payload\n\n
     String? eventType;
     String? eventData;
 
+    final lines = eventText.split('\n');
     for (final line in lines) {
       if (line.startsWith('event:')) {
         eventType = line.substring(6).trim();
@@ -133,6 +156,7 @@ class SseStreamService {
   }
 
   void _handleError(Object e) {
+    _lastDataTime = null;
     if (_disposed) return;
     _scheduleReconnect();
   }
@@ -222,7 +246,7 @@ class SseStreamService {
     if (_disposed || _client == null) return;
     try {
       await _client!.post(
-        Uri.parse('$baseUrl/chat/end'),
+        Uri.parse('$baseUrl/upload/chat/end'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'ctxId': sessionId}),
       );

@@ -1,88 +1,104 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
-import 'package:flutter/foundation.dart';
+import 'dart:io';
 import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
+import 'package:record/record.dart';
+import 'package:flutter/foundation.dart';
 
 /// 音频录制服务
 /// 固定16KHz、mono、PCM格式，每200ms封装一个分片，base64编码后HTTP上传
+/// 录音结束后将PCM数据写入临时文件，供Whisper ASR使用
 class AudioRecorderService {
-  // 固定16KHz采样率（record插件实际使用时配置）
   static const int _chunkDurationMs = 200;
-  static const int _maxChunkSizeBytes = 32 * 1024; // 32KB
 
   final String baseUrl;
   final String sessionId;
 
-  http.Client? _client;
-  bool _isRecording = false;
+  final AudioRecorder _recorder = AudioRecorder();
   Timer? _chunkTimer;
-  final List<Int16List> _buffer = [];
+  http.Client? _httpClient;
+  bool _isRecording = false;
+  File? _pcmFile;
+  IOSink? _pcmSink;
 
   // 回调
-  Function(Uint8List chunk, int durationMs)? onChunkReady;
+  void Function(Uint8List chunk, int durationMs)? onChunkReady;
   VoidCallback? onRecordingStart;
   VoidCallback? onRecordingStop;
-  Function(String error)? onError;
+  void Function(String error)? onError;
 
   AudioRecorderService({required this.baseUrl, required this.sessionId});
 
   bool get isRecording => _isRecording;
 
-  /// 开始录音（平台相关实现需注入 Record 插件）
-  /// 此处为骨架：实际调用 record 插件的 start() 方法
+  /// 获取最近一次录制的完整 PCM 数据
+  /// 供离线模式 Whisper ASR 使用
+  Future<Uint8List?> getLatestPcmData() async {
+    if (_pcmFile == null || !await _pcmFile!.exists()) return null;
+    try {
+      final bytes = await _pcmFile!.readAsBytes();
+      await _pcmFile!.delete();
+      _pcmFile = null;
+      return bytes;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 开始录音
   Future<void> startRecording() async {
     if (_isRecording) return;
-    _client = http.Client();
-    _buffer.clear();
+
+    if (!await _recorder.hasPermission()) {
+      onError?.call('麦克风权限未授权');
+      return;
+    }
+
+    _httpClient = http.Client();
+
+    // 创建临时PCM文件（用于Whisper）
+    final dir = await getTemporaryDirectory();
+    _pcmFile = File('${dir.path}/recording_${DateTime.now().millisecondsSinceEpoch}.pcm');
+    _pcmSink = _pcmFile!.openWrite();
+
+    // 16KHz mono PCM：每秒 32000 字节
+    await _recorder.start(
+      const RecordConfig(
+        encoder: AudioEncoder.pcm16bits,
+        sampleRate: 16000,
+        numChannels: 1,
+        bitRate: 256000,
+      ),
+      path: _pcmFile!.path,
+    );
+
     _isRecording = true;
     onRecordingStart?.call();
 
-    // 每200ms封装一次分片（实际由 record 插件触发）
+    // 每200ms读一次文件内容并上传
     _chunkTimer = Timer.periodic(
       const Duration(milliseconds: _chunkDurationMs),
       (_) => _flushChunk(),
     );
   }
 
-  /// 喂入PCM数据（由 record 插件回调）
-  void feedPcmData(Int16List pcmData) {
-    if (!_isRecording) return;
-    _buffer.add(pcmData);
-
-    // 超限保护：超过32KB直接丢弃最早分片
-    int totalBytes = _buffer.fold(0, (sum, chunk) => sum + chunk.length * 2);
-    while (totalBytes > _maxChunkSizeBytes && _buffer.length > 1) {
-      final removed = _buffer.removeAt(0);
-      totalBytes -= removed.length * 2;
-    }
-  }
-
-  void _flushChunk() {
-    if (!_isRecording || _buffer.isEmpty) return;
-
-    // 合并缓冲区
-    int totalSamples = _buffer.fold(0, (sum, chunk) => sum + chunk.length);
-    final merged = Int16List(totalSamples);
-    int offset = 0;
-    for (final chunk in _buffer) {
-      merged.setRange(offset, offset + chunk.length, chunk);
-      offset += chunk.length;
-    }
-    _buffer.clear();
-
-    final bytes = Uint8List.fromList(merged.buffer.asUint8List());
-    final encoded = base64Encode(bytes);
-    onChunkReady?.call(bytes, _chunkDurationMs);
-
-    // HTTP上传
-    _uploadChunk(encoded);
+  Future<void> _flushChunk() async {
+    if (!_isRecording || _pcmFile == null) return;
+    try {
+      final stat = await _pcmFile!.stat();
+      if (stat.size < 640) return; // 不到20ms数据，跳过
+      final bytes = await _pcmFile!.readAsBytes();
+      final encoded = base64Encode(bytes);
+      onChunkReady?.call(bytes, _chunkDurationMs);
+      await _uploadChunk(encoded);
+    } catch (_) {}
   }
 
   Future<void> _uploadChunk(String base64Audio) async {
-    if (_client == null) return;
+    if (_httpClient == null) return;
     try {
-      await _client!.post(
+      await _httpClient!.post(
         Uri.parse('$baseUrl/upload/audio_chunk'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'ctxId': sessionId, 'audio': base64Audio}),
@@ -96,25 +112,39 @@ class AudioRecorderService {
   Future<void> stopRecording() async {
     if (!_isRecording) return;
     _isRecording = false;
+
     _chunkTimer?.cancel();
     _chunkTimer = null;
 
+    await _recorder.stop();
+
+    // 读取并上传最后一块
+    await _flushChunk();
+
+    await _pcmSink?.flush();
+    await _pcmSink?.close();
+    _pcmSink = null;
+
     // 发送结束标识
     try {
-      await _client?.post(
+      await _httpClient?.post(
         Uri.parse('$baseUrl/upload/audio_chunk'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'ctxId': sessionId, 'audio': '', 'end': true}),
       );
     } catch (_) {}
 
-    _client?.close();
-    _client = null;
+    _httpClient?.close();
+    _httpClient = null;
     onRecordingStop?.call();
   }
 
   void dispose() {
-    stopRecording();
+    _chunkTimer?.cancel();
+    _recorder.stop();
+    _pcmSink?.close();
+    _pcmFile?.delete();
+    _httpClient?.close();
+    _recorder.dispose();
   }
 }
-
