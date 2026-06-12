@@ -45,7 +45,7 @@ dependencies:
   llama_cpp_dart: ^0.2.2
 
   # 音频录制（16KHz PCM）
-  record: ^5.0.4
+  record: ^6.2.1
 
 dev_dependencies:
   flutter_test:
