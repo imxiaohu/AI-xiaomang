@@ -98,8 +98,8 @@ class _VisualChatScreenState extends State<VisualChatScreen>
               // === 底部操作栏 ===
               Positioned(
                 bottom: appState.chatPanelExpanded
-                    ? MediaQuery.of(context).size.height * 0.45 + 10
-                    : _bottomSafePadding(context),
+                    ? _chatPanelHeight(context, expanded: true) + 10
+                    : _chatPanelHeight(context, expanded: false) + _bottomSafePadding(context),
                 left: 0,
                 right: 0,
                 child: BottomActionBar(
@@ -216,6 +216,14 @@ class _VisualChatScreenState extends State<VisualChatScreen>
         ),
       ),
     );
+  }
+
+  /// ChatPanel 高度（折叠52dp，展开45%屏幕高度）
+  double _chatPanelHeight(BuildContext context, {required bool expanded}) {
+    if (expanded) {
+      return MediaQuery.of(context).size.height * 0.45;
+    }
+    return 52.0; // 折叠态：拖拽条+一行文字高度
   }
 
   double _bottomSafePadding(BuildContext context) {

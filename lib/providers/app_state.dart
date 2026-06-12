@@ -398,7 +398,7 @@ class AppState extends ChangeNotifier {
         debugPrint('[AppState] Offline inference error: $e');
         if (_disposed) return;
         addAiMessage('离线推理失败，请检查模型文件是否正确放置在assets目录');
-        startSpeaking();
+        goIdle(); // 直接回idle，避免TTS不可用时卡在speaking状态
       }
     }
   }
