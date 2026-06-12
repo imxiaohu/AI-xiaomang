@@ -1,5 +1,5 @@
 # iOS 最低版本：16.0（支持后台音频、Metal加速推理）
-platform :ios, '26.5'
+platform :ios, '16.0'
 
 # CocoaPods analytics sends network stats synchronously affecting flutter build latency.
 ENV['COCOAPODS_DISABLE_STATS'] = 'true'
