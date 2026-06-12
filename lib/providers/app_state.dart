@@ -10,6 +10,7 @@ import '../services/video_capture.dart';
 import '../services/audio_player_service.dart';
 import '../services/connectivity_service.dart';
 import '../services/offline_ai_engine.dart';
+import '../services/background_audio_service.dart';
 import '../utils/tts_service.dart';
 
 /// 全局业务状态编排
@@ -113,6 +114,7 @@ class AppState extends ChangeNotifier {
   ConnectivityService? _connectivity;
   TtsService? _ttsService;
   OfflineAIEngine? _offlineEngine;
+  BackgroundAudioService? _backgroundService;
 
   // ==============================
   // 互斥锁
@@ -164,6 +166,12 @@ class AppState extends ChangeNotifier {
 
     // 初始化摄像头
     await _initCamera();
+
+    // 初始化后台保活服务
+    _backgroundService = BackgroundAudioService();
+    _backgroundService!.onError = (e) {
+      debugPrint('[AppState] Background service error: $e');
+    };
 
     // 初始化离线AI引擎
     _offlineEngine = OfflineAIEngine();
@@ -318,6 +326,9 @@ class AppState extends ChangeNotifier {
       _videoCapture?.startCapture();
     }
 
+    // 启动后台保活
+    _backgroundService?.start();
+
     // 启动录音计时
     _recordingTimer?.cancel();
     _recordingTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
@@ -391,6 +402,7 @@ class AppState extends ChangeNotifier {
 
     if (_runMode == AppRunMode.offlineLocal) {
       // 离线模式使用本地TTS
+      _backgroundService?.start();
       final lastAiMsg = _messages.lastOrNull;
       if (lastAiMsg != null) {
         _ttsService?.speak(lastAiMsg.text);
@@ -406,6 +418,8 @@ class AppState extends ChangeNotifier {
     _aiStatus = AiStatus.idle;
     _recordingSeconds = 0;
     _resetIdleTimer();
+    // 停止后台保活（idle状态节能）
+    _backgroundService?.stop();
     notifyListeners();
   }
 
@@ -514,6 +528,7 @@ class AppState extends ChangeNotifier {
     _connectivity?.dispose();
     _ttsService?.dispose();
     _offlineEngine?.dispose();
+    _backgroundService?.dispose();
     _cameraController?.dispose();
     super.dispose();
   }
