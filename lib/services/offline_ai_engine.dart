@@ -87,10 +87,10 @@ class OfflineAIEngine {
   }
 
   /// 加载 Qwen-VL GGUF 模型
-  /// 模型路径：应用私有目录/Qwen-VL-1.8B-Q4_K_M.gguf
+  /// 模型路径：应用私有目录/Qwen-VL-2B-Q4_K_M.gguf
   Future<void> _loadVL() async {
     try {
-      final modelPath = await _getModelPath('Qwen-VL-1.8B-Q4_K_M.gguf');
+      final modelPath = await _getModelPath('Qwen-VL-2B-Q4_K_M.gguf');
       if (modelPath == null) {
         debugPrint('[OfflineAIEngine] VL model not found, using simulation mode');
         _vlReady = true;

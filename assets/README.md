@@ -4,15 +4,18 @@
 
 ### 1. Whisper-tiny-int8（TFLite 格式）
 - **用途**：端侧语音识别（ASR）
-- **下载地址**：https://huggingface.co/onnx-community/whisper-tiny-int8/tree/main
+- **HuggingFace**：https://huggingface.co/onnx-community/whisper-tiny-int8/tree/main
 - **文件名**：`whisper-tiny-int8.tflite`（约 31MB）
 - **加载方式**：`tflite_flutter` 插件加载到 `/assets/whisper-tiny-int8.tflite`
+- **魔搭**：魔搭无官方 TFLite 镜像，默认从 HuggingFace 下载
 
-### 2. Qwen2-VL-1.8B-Instruct（GGUF 量化格式）
+### 2. Qwen2-VL-2B-Instruct（GGUF 量化格式）
 - **用途**：端侧视觉理解（VL）
-- **下载地址**：https://huggingface.co/Qwen/Qwen2-VL-1.8B-Instruct-GGUF
-- **推荐量化**：Q4_K_M（约 1.1GB）
-- **加载方式**：`llama_cpp_dart` 插件加载到 `/assets/Qwen-VL-1.8B-Q4_K_M.gguf`
+- **魔搭（推荐，国内高速）**：https://modelscope.cn/models/bartowski/Qwen2-VL-2B-Instruct-GGUF
+- **HuggingFace（国际）**：https://huggingface.co/bartowski/Qwen2-VL-2B-Instruct-GGUF
+- **推荐量化**：Q4_K_M（约 0.99GB）
+- **本地文件名**：`Qwen-VL-2B-Q4_K_M.gguf`
+- **加载方式**：`llama_cpp_dart` 插件加载到 `/assets/Qwen-VL-2B-Q4_K_M.gguf`
 
 ### 3. Ball OBJ（3D 球体模型）
 - **用途**：3D 球体渲染
@@ -23,8 +26,17 @@
 ```bash
 cd assets/
 chmod +x download_models.sh
-./download_models.sh
+./download_models.sh              # 自动选择最优源
+./download_models.sh ms           # 强制从魔搭下载（国内推荐）
+./download_models.sh hf           # 强制从 HuggingFace 下载
 ```
+
+### 下载源说明
+
+| 模型 | 魔搭 | HuggingFace | 默认源 |
+|------|------|-------------|--------|
+| Whisper TFLite | 无镜像 | ✅ 完整 | HF |
+| Qwen-VL GGUF | ✅ bartowski 镜像 | ✅ 完整 | 魔搭 |
 
 ## 校验方式
 
@@ -33,7 +45,7 @@ chmod +x download_models.sh
 md5 assets/whisper-tiny-int8.tflite
 
 # Qwen-VL GGUF
-md5 assets/Qwen-VL-1.8B-Q4_K_M.gguf
+md5 assets/Qwen-VL-2B-Q4_K_M.gguf
 ```
 
 ## 模型文件大小估算
@@ -41,7 +53,7 @@ md5 assets/Qwen-VL-1.8B-Q4_K_M.gguf
 | 模型 | 量化 | 预估大小 |
 |------|------|---------|
 | Whisper-tiny | int8 TFLite | ~31MB |
-| Qwen2-VL-1.8B | Q4_K_M GGUF | ~1.1GB |
+| Qwen2-VL-2B | Q4_K_M GGUF | ~0.99GB |
 
 ## 重要说明
 
