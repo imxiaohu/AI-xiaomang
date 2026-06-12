@@ -62,8 +62,7 @@ backend/*.pyc
 # Flutter iOS build
 /ios/Runner/Flutter/*.xcstate
 /ios/.symlinks/
-
-# macOS
+/ios/Frameworks/
 *.dSYM/
 
 # Cursor Agent（禁止提交）
