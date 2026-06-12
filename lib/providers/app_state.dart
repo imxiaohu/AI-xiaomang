@@ -9,6 +9,7 @@ import '../services/audio_recorder_service.dart';
 import '../services/video_capture.dart';
 import '../services/audio_player_service.dart';
 import '../services/connectivity_service.dart';
+import '../services/offline_ai_engine.dart';
 import '../utils/tts_service.dart';
 
 /// 全局业务状态编排
@@ -111,6 +112,7 @@ class AppState extends ChangeNotifier {
   AudioPlayerService? _audioPlayer;
   ConnectivityService? _connectivity;
   TtsService? _ttsService;
+  OfflineAIEngine? _offlineEngine;
 
   // ==============================
   // 互斥锁
@@ -163,8 +165,25 @@ class AppState extends ChangeNotifier {
     // 初始化摄像头
     await _initCamera();
 
-    // 模拟模型加载
-    _simulateModelLoading();
+    // 初始化离线AI引擎
+    _offlineEngine = OfflineAIEngine();
+    _offlineEngine!.onWhisperResult = (text) {
+      debugPrint('[AppState] Whisper result: $text');
+    };
+    _offlineEngine!.onVLResult = (text) {
+      debugPrint('[AppState] VL result: $text');
+    };
+    _offlineEngine!.onError = (e) {
+      debugPrint('[AppState] Offline engine error: $e');
+    };
+    _offlineEngine!.onModelLoadProgress = (p) {
+      _modelLoadProgress = p;
+      notifyListeners();
+    };
+    await _offlineEngine!.init(_hardwareInfo);
+    _modelLoaded = _offlineEngine!.isWhisperReady;
+    _modelLoadProgress = 1.0;
+    notifyListeners();
   }
 
   Future<void> _initCamera() async {
@@ -182,18 +201,6 @@ class AppState extends ChangeNotifier {
     } catch (e) {
       debugPrint('Camera init failed: $e');
     }
-  }
-
-  void _simulateModelLoading() async {
-    for (int i = 1; i <= 20; i++) {
-      await Future.delayed(const Duration(milliseconds: 150));
-      if (_disposed) return;
-      _modelLoadProgress = i / 20.0;
-      notifyListeners();
-    }
-    _modelLoaded = true;
-    _modelLoadProgress = 1.0;
-    notifyListeners();
   }
 
   // ==============================
@@ -344,12 +351,33 @@ class AppState extends ChangeNotifier {
       _sseService?.endTurn();
       // 等待SSE推送（thinking状态保持）
     } else {
-      // 离线推理占位（Day2接入真实引擎）
-      await Future.delayed(const Duration(seconds: 2));
-      if (_disposed) return;
-      const answer = '这是离线模式下的回复，请先集成Whisper和Qwen-VL模型';
-      addAiMessage(answer);
-      startSpeaking();
+      // 离线推理：Whisper ASR + Qwen-VL 视觉理解 + 本地回答
+      try {
+        // 获取最新录制的PCM数据（由audio_recorder_service提供）
+        // 此处从最近一条用户消息获取识别文本作为占位
+        final userMsg = _messages.where((m) => m.isUser).lastOrNull;
+        final userText = userMsg?.text ?? '你好';
+
+        // 调用离线引擎进行视觉+语言推理
+        String answer;
+        if (_offlineEngine?.isVLReady == true) {
+          // 有视觉模型时进行图文理解
+          // 注意：实际应从最新抽帧获取图像bytes
+          answer = await _offlineEngine!.chat(userText);
+        } else {
+          // 无视觉模型时纯语音对话
+          answer = await _offlineEngine!.chat(userText);
+        }
+
+        if (_disposed) return;
+        addAiMessage(answer);
+        startSpeaking();
+      } catch (e) {
+        debugPrint('[AppState] Offline inference error: $e');
+        if (_disposed) return;
+        addAiMessage('离线推理失败，请检查模型文件是否正确放置在assets目录');
+        startSpeaking();
+      }
     }
   }
 
@@ -485,6 +513,7 @@ class AppState extends ChangeNotifier {
     _audioPlayer?.dispose();
     _connectivity?.dispose();
     _ttsService?.dispose();
+    _offlineEngine?.dispose();
     _cameraController?.dispose();
     super.dispose();
   }
