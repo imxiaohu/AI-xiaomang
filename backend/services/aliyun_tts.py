@@ -1,10 +1,10 @@
-"""阿里云实时语音合成（DashScope CosyVoice / Qwen-TTS WebSocket 流式）"""
+"""阿里云实时语音合成（DashScope Qwen-TTS WebSocket 流式）"""
 import asyncio
 import json
 import base64
 import websockets
 from typing import Callable
-from config import DASHSCOPE_API_KEY, DAILY_TTS_QUOTA
+from config import DASHSCOPE_API_KEY, DAILY_TTS_QUOTA, TTS_MODEL, TTS_VOICE
 
 
 # 每日已使用额度（简单内存计数，生产环境应持久化到 Redis/数据库）
@@ -13,32 +13,69 @@ _daily_tts_usage = 0.0
 
 class AliyunTTS:
     """
-    阿里云实时语音合成 — DashScope WebSocket 流式接口
+    阿里云实时语音合成 — DashScope Qwen-TTS WebSocket 流式接口
 
     认证：DASHSCOPE_API_KEY（百炼平台 API Key）
-    模型：cosyvoice-v3-flash（推荐，CosyVoice v3 最新版）
-          qwen3-tts-flash-realtime（Qwen-TTS）
+    模型：qwen3-tts-flash-realtime（推荐，Qwen3-TTS 最新版）
     协议：wss://dashscope.aliyuncs.com/api-ws/v1/inference
-          （与实时 ASR 同一端点，共用连接）
 
-    server_commit 模式：服务端自动处理文本分段与合成时机（适合大段文本）
     commit 模式：客户端主动提交触发合成（适合对话逐轮合成）
+    server_commit 模式：服务端自动处理文本分段与合成时机（适合大段文本）
 
     文档：https://help.aliyun.com/zh/model-studio/realtime-tts-user-guide/
     """
 
-    # CosyVoice v3-flash 音色列表（中文普通话）
-    VOICE_LONGANYANG = "longanyang"    # 女声，自然大方
-    VOICE_LONGXIAOCHUN_V2 = "longxiaochun_v2"  # 女声，活泼可爱
+    # Qwen-TTS 音色常量（默认 Cherry 芊悦，阳光亲切）
+    # ── 中文普通话 ──
+    VOICE_CHERRY      = "Cherry"       # 芊悦，阳光积极、亲切自然（女）
+    VOICE_SERENA      = "Serena"      # 苏瑶，温柔小姐姐（女）
+    VOICE_ETHAN       = "Ethan"       # 晨煦，标准普通话，阳光温暖（男）
+    VOICE_CHELSIE     = "Chelsie"     # 千雪，二次元虚拟女友（女）
+    VOICE_MOMO        = "Momo"         # 茉兔，撒娇搞怪（女）
+    VOICE_VIVIAN      = "Vivian"      # 十三，拽拽可爱小暴躁（女）
+    VOICE_MOON        = "Moon"         # 月白，率性帅气（男）
+    VOICE_MAIA        = "Maia"         # 四月，知性温柔（女）
+    VOICE_KAI         = "Kai"          # 凯，耳朵SPA（男）
+    VOICE_NOFISH      = "Nofish"      # 不吃鱼，不会翘舌音（男）
+    VOICE_BELLA       = "Bella"        # 萌宝，小萝莉（女）
+    VOICE_JENNIFER    = "Jennifer"     # 詹妮弗，品牌级美语女声（女）
+    VOICE_RYAN        = "Ryan"         # 甜茶，节奏炸裂（男）
+    VOICE_KATERINA    = "Katerina"    # 卡捷琳娜，御姐（女）
+    VOICE_AIDEN       = "Aiden"        # 艾登，美语大男孩（男）
+    VOICE_ELDRIC_SAGE = "Eldric Sage" # 沧明子，沉稳睿智老者（男）
+    VOICE_MIA         = "Mia"          # 乖小妹，温顺乖巧（女）
+    VOICE_MOCHI       = "Mochi"       # 沙小弥，聪明伶俐小大人（男）
+    VOICE_BELLONA     = "Bellona"     # 燕铮莺，金戈铁马江湖女声（女）
+    VOICE_VINCENT     = "Vincent"      # 田叔，沙哑烟嗓江湖（男）
+    VOICE_BUNNY       = "Bunny"        # 萌小姬，萌属性小萝莉（女）
+    VOICE_NEIL        = "Neil"         # 阿闻，专业新闻主持（男）
+    VOICE_ELIAS       = "Elias"        # 墨讲师，学科严谨叙事（女）
+    VOICE_ARTHUR      = "Arthur"       # 徐大爷，质朴沧桑老者（男）
+    VOICE_NINI        = "Nini"         # 邻家妹妹，软黏甜腻（女）
+    VOICE_SEREN       = "Seren"        # 小婉，温和舒缓助眠（女）
+    VOICE_PIP         = "Pip"          # 顽屁小孩，调皮童真（男）
+    VOICE_STELLA      = "Stella"       # 少女阿月，甜腻正义（女）
+
+    # ── 中文方言 ──
+    VOICE_JADA       = "Jada"          # 上海阿珍，风风火火沪上阿姐（女）
+    VOICE_DYLAN      = "Dylan"         # 北京晓东，胡同少年（男）
+    VOICE_LI         = "Li"            # 南京老李，耐心瑜伽老师（男）
+    VOICE_MARCUS     = "Marcus"         # 陕西秦川，老陕（男）
+    VOICE_ROY        = "Roy"           # 闽南阿杰，市井活泼（男）
+    VOICE_PETER      = "Peter"         # 天津李彼得，相声捧哏（男）
+    VOICE_SUNNY      = "Sunny"         # 四川晴儿，甜到心里川妹（女）
+    VOICE_ERIC       = "Eric"          # 四川程川，跳脱市井（男）
+    VOICE_ROCKY      = "Rocky"         # 粤语阿强，幽默风趣（男）
+    VOICE_KIKI       = "Kiki"          # 粤语阿清，甜美港妹（女）
 
     def __init__(
         self,
-        model: str = "cosyvoice-v3-flash",
-        voice: str = "longanyang",
+        model: str | None = None,
+        voice: str | None = None,
     ):
         self._api_key = DASHSCOPE_API_KEY
-        self._model = model
-        self._voice = voice
+        self._model = model or TTS_MODEL
+        self._voice = voice or TTS_VOICE
         self._ws = None
         self._connected = False
         self._task: asyncio.Task | None = None
@@ -48,7 +85,6 @@ class AliyunTTS:
         return _daily_tts_usage < DAILY_TTS_QUOTA
 
     def add_usage(self, seconds: float):
-        """记录使用量（估算）"""
         global _daily_tts_usage
         _daily_tts_usage += seconds
 
