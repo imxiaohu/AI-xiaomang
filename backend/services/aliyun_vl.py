@@ -1,208 +1,217 @@
-"""阿里云通义千问VL服务（dashscope API，支持图文对话）"""
+"""阿里云通义千问 VL/文本服务（OpenAI 兼容端点，流式/非流式）"""
 import json
 import httpx
-from typing import Callable
+from typing import AsyncIterator, Callable, Awaitable
 from config import DASHSCOPE_API_KEY, ALIYUN_REGION
 
 
 class AliyunVL:
     """
-    通义千问 VL 服务
+    通义千问 VL/文本服务 — OpenAI 兼容流式接口
 
-    HTTP 调用 dashscope API，支持图文多模态对话。
-    模型：qwen-vl-plus（视觉理解）或 qwen-vl-max（更强视觉）
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    认证: DASHSCOPE_API_KEY
 
-    文档：
-    - https://help.aliyun.com/zh/model-studio/text-generation-model/
-    - 百炼平台：https://bailian.console.aliyun.com/
+    模型:
+      - qwen-vl-plus / qwen-vl-max  (图文对话)
+      - qwen-plus / qwen-max        (纯文本)
+      - qwen3-vl-plus / qwen3-vl-max (Qwen3 视觉)
+      - qwen3-plus / qwen3-max      (Qwen3 文本)
+
+    文档: https://help.aliyun.com/zh/model-studio/stream
     """
 
-    def __init__(self):
+    # OpenAI 兼容端点（流式推荐用这个）
+    BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+    def __init__(self, model: str = "qwen-vl-plus"):
         self._api_key = DASHSCOPE_API_KEY
+        self._model = model
         self._region = ALIYUN_REGION
-        self._base_url = "https://dashscope.aliyuncs.com/api/v1"
 
     @property
     def is_configured(self) -> bool:
         return bool(self._api_key)
 
-    async def chat_with_image(
-        self,
-        image_base64: str,
-        prompt: str,
-        context: list[dict[str, str]],
-    ) -> str:
-        """
-        图文对话（非流式，返回完整文本）
-        context: 消息历史，每条 { "role": "user"|"assistant", "content": str }
-        """
-        if not self.is_configured:
-            raise RuntimeError("DASHSCOPE_API_KEY not configured")
-
-        headers = {
+    def _make_headers(self) -> dict:
+        return {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
 
-        # 构建消息历史
-        messages = []
-        for msg in context:
-            if isinstance(msg.get("content"), str):
-                messages.append({"role": msg["role"], "content": msg["content"]})
-            elif isinstance(msg.get("content"), list):
-                messages.append(msg)
-
-        # 当前用户消息：文本 + 图片
-        messages.append({
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"},
-                },
-            ],
-        })
-
-        # dashscope 多模态生成接口（qwen-vl-plus）
-        payload = {
-            "model": "qwen-vl-plus",
-            "input": {"messages": messages},
-            "parameters": {"stream": False},
-        }
-
-        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
-            resp = await client.post(
-                f"{self._base_url}/services/aigc/multimodal-generation/generation",
-                headers=headers,
-                json=payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-
-        # 解析返回：{ "output": { "choices": [{ "message": { "content": "..." } }] } }
-        output = data.get("output", {})
-        choices = output.get("choices", [])
-        if choices:
-            return choices[0].get("message", {}).get("content", "")
-        return ""
-
-    async def chat_with_image_stream(
+    async def chat_stream(
         self,
-        image_base64: str,
-        prompt: str,
-        context: list[dict[str, str]],
-        on_token: Callable[[str], None] | None = None,
-    ) -> str:
+        messages: list[dict],
+        on_token: Callable[[str], Awaitable[None]] | None = None,
+    ) -> AsyncIterator[str]:
         """
-        图文对话（流式，通过 on_token 回调逐 token 返回）
-        注意：qwen-vl-plus 视觉模型不支持 SSE 流式，
-        此方法通过逐 token 模拟流式效果（实际为非流式一次性返回）。
-        如需真实流式视觉回答，请使用 qwen-vl-max 或 text-generation 端点。
+        流式对话（真实 SSE，逐 token yield）
+
+        messages: OpenAI 格式消息列表
+        on_token: 每个 token 的回调（可选，用于实时处理）
+
+        Yields:
+            每个文本 token（可能含标点，逐字符或逐词）
+
+        Usage:
+            async for token in vl.chat_stream(messages):
+                print(token, end="", flush=True)
         """
         if not self.is_configured:
             raise RuntimeError("DASHSCOPE_API_KEY not configured")
 
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
-
-        messages = []
-        for msg in context:
-            if isinstance(msg.get("content"), str):
-                messages.append({"role": msg["role"], "content": msg["content"]})
-            elif isinstance(msg.get("content"), list):
-                messages.append(msg)
-
-        messages.append({
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"},
-                },
-            ],
-        })
-
         payload = {
-            "model": "qwen-vl-plus",
-            "input": {"messages": messages},
-            "parameters": {"stream": True},  # dashscope 支持流式
+            "model": self._model,
+            "messages": messages,
+            "stream": True,
         }
 
-        full_text = ""
         async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
             async with client.stream(
                 "POST",
-                f"{self._base_url}/services/aigc/multimodal-generation/generation",
-                headers=headers,
+                f"{self.BASE_URL}/chat/completions",
+                headers=self._make_headers(),
                 json=payload,
             ) as resp:
                 resp.raise_for_status()
                 async for line in resp.aiter_lines():
                     if not line.strip() or not line.startswith("data:"):
                         continue
+
                     data_str = line[5:].strip()
-                    if not data_str or data_str == "[DONE]":
-                        continue
+                    if data_str == "[DONE]":
+                        break
+
                     try:
                         chunk = json.loads(data_str)
-                        # 视觉模型流式返回格式
-                        choices = chunk.get("output", {}).get("choices", [])
-                        if choices:
-                            token = choices[0].get("message", {}).get("content", "")
-                        else:
-                            token = chunk.get("output", {}).get("text", "")
-                        if token:
-                            full_text += token
-                            if on_token:
-                                on_token(token)
                     except json.JSONDecodeError:
                         continue
 
-        return full_text
+                    # OpenAI 流式格式
+                    choices = chunk.get("choices", [])
+                    if not choices:
+                        continue
 
-    async def chat_text_only(
+                    delta = choices[0].get("delta", {})
+                    content = delta.get("content")
+
+                    # 思考模型：reasoning_content 先于 content
+                    # visual 模型不会有 reasoning_content
+                    if content:
+                        yield content
+                        if on_token:
+                            await on_token(content)
+
+    async def chat(
         self,
-        prompt: str,
-        context: list[dict[str, str]],
+        messages: list[dict],
     ) -> str:
         """
-        纯文本对话（不使用视觉），调用 text-generation 端点。
-        适合没有图片输入时的对话，可支持真实 SSE 流式。
+        非流式对话（一次性返回完整文本）
         """
         if not self.is_configured:
             raise RuntimeError("DASHSCOPE_API_KEY not configured")
 
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
-
-        messages = []
-        for msg in context:
-            messages.append({"role": msg["role"], "content": msg.get("content", "")})
-
-        messages.append({"role": "user", "content": prompt})
-
         payload = {
-            "model": "qwen-plus",
-            "input": {"messages": messages},
-            "parameters": {"stream": False},
+            "model": self._model,
+            "messages": messages,
+            "stream": False,
         }
 
-        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
             resp = await client.post(
-                f"{self._base_url}/services/aigc/text-generation/generation",
-                headers=headers,
+                f"{self.BASE_URL}/chat/completions",
+                headers=self._make_headers(),
                 json=payload,
             )
             resp.raise_for_status()
             data = resp.json()
 
-        choices = data.get("output", {}).get("choices", [])
+        choices = data.get("choices", [])
         if choices:
-            return choices[0].get("message", {}).get("content", "")
+            return choices[0].get("message", {}).get("content", "") or ""
         return ""
+
+    # ── 快捷构造方法 ────────────────────────────────────────────
+
+    async def chat_with_image_stream(
+        self,
+        image_base64: str,
+        prompt: str,
+        context: list[dict],
+        on_token: Callable[[str], Awaitable[None]] | None = None,
+    ) -> AsyncIterator[str]:
+        """
+        图文流式对话（流式 SSE，逐 token yield）
+        context: 消息历史，每条 { "role": "user"|"assistant", "content": str 或 list }
+        """
+        messages = self._build_messages(context, prompt, image_base64)
+        async for token in self.chat_stream(messages, on_token=on_token):
+            yield token
+
+    async def chat_with_image(
+        self,
+        image_base64: str,
+        prompt: str,
+        context: list[dict],
+    ) -> str:
+        """
+        图文非流式对话
+        """
+        messages = self._build_messages(context, prompt, image_base64)
+        return await self.chat(messages)
+
+    def _build_messages(
+        self,
+        context: list[dict],
+        prompt: str,
+        image_base64: str,
+    ) -> list[dict]:
+        """构造 OpenAI 格式消息列表（含图片）"""
+        messages = []
+        for msg in context:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                messages.append({"role": role, "content": content})
+            elif isinstance(content, list):
+                messages.append({"role": role, "content": content})
+
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
+                {"type": "text", "text": prompt},
+            ],
+        })
+        return messages
+
+    async def chat_text_only_stream(
+        self,
+        prompt: str,
+        context: list[dict],
+        on_token: Callable[[str], Awaitable[None]] | None = None,
+    ) -> AsyncIterator[str]:
+        """
+        纯文本流式对话
+        context: 消息历史，每条 { "role": "user"|"assistant", "content": str }
+        """
+        messages = []
+        for msg in context:
+            messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
+        messages.append({"role": "user", "content": prompt})
+
+        async for token in self.chat_stream(messages, on_token=on_token):
+            yield token
+
+    async def chat_text_only(
+        self,
+        prompt: str,
+        context: list[dict],
+    ) -> str:
+        """纯文本非流式对话"""
+        messages = []
+        for msg in context:
+            messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
+        messages.append({"role": "user", "content": prompt})
+        return await self.chat(messages)

@@ -103,7 +103,12 @@ def _mock_text_response(question: str) -> str:
 async def trigger_session_inference(session, ctx_id: str):
     """
     共享推理函数：被 SSE 事件流、/chat/infer、/upload/chat/end 调用。
-    从 session 取出音频/帧/文本，执行 VL 推理 + TTS 合成，结果写入 session.sse_queue。
+    从 session 取出音频/帧/文本，执行 VL 流式推理 + TTS 流式合成，结果写入 session.sse_queue。
+
+    核心设计：
+    - VL 通过 SSE 实时推送 token（用户看到打字机效果）
+    - TTS 通过 input_text.append 实时合成音频（几乎同步播放）
+    - 两者并行，音频紧跟文本
     """
     sse_queue = session.sse_queue
     if sse_queue is None:
@@ -117,75 +122,110 @@ async def trigger_session_inference(session, ctx_id: str):
         except asyncio.CancelledError:
             pass
 
+    full_text = ""
+    total_audio_chunks = 0
+
     try:
+        # ── 准备输入 ────────────────────────────────────────────
         vl = AliyunVL()
         tts = AliyunTTS()
 
         user_text = session.transcribed_text
         if not user_text and session.audio_buffer:
             user_text = await _do_backend_asr(session)
-
         if not user_text:
             user_text = "你好"
 
         frame_data = session.frame_buffer[-1] if session.frame_buffer else None
         context = session.get_context()
 
-        if vl.is_configured and frame_data:
-            try:
-                if DEBUG:
-                    full_text = _mock_vl_response(user_text)
-                else:
-                    full_text = await vl.chat_with_image(
-                        image_base64=frame_data["frame"],
-                        prompt=user_text,
-                        context=context,
-                    )
-            except Exception as e:
-                full_text = f"视觉理解服务异常：{e}"
+        # ── DEBUG 模式：Mock 非流式 ─────────────────────────────
+        if DEBUG:
+            full_text = _mock_vl_response(user_text)
+            for sent in _split_sentences_for_sse(full_text):
+                await sse_queue.put({
+                    "event": "text",
+                    "data": json.dumps({"text": sent, "is_final": False}),
+                })
+                await asyncio.sleep(0.05)
+            total_audio_chunks = 0
+
+        # ── 真实推理：VL 流式 + TTS 流式 ───────────────────────
         else:
-            full_text = _mock_text_response(user_text)
-
-        session.add_message("user", user_text)
-        session.add_message("assistant", full_text)
-        session.transcribed_text = ""
-        session.touch()
-
-        for sent in _split_sentences_for_sse(full_text):
-            await sse_queue.put({
-                "event": "text",
-                "data": json.dumps({"text": sent, "is_final": False}),
-            })
-            await asyncio.sleep(0.05)
-
-        if tts.check_quota():
-            audio_index = 0
+            tts_ctx = None
             try:
-                if not DEBUG:
-                    async def on_tts_chunk(mp3_base64: str, idx: int):
-                        nonlocal audio_index
-                        audio_index = idx
-                        await sse_queue.put({
-                            "event": "audio",
-                            "data": json.dumps({"audio": mp3_base64, "index": idx}),
-                        })
-                    await tts.synthesize_stream(full_text, on_tts_chunk)
-                    total_chunks = audio_index + 1
-                else:
-                    total_chunks = 0
-            except Exception as e:
-                print(f"[SSE] TTS error: {e}")
-                total_chunks = 0
-        else:
-            total_chunks = 0
-            await sse_queue.put({
-                "event": "quota_exceeded",
-                "data": json.dumps({"reason": "Daily TTS quota exceeded"}),
-            })
+                # 启动 TTS 流式连接（在 VL 之前，确保音频先就绪）
+                if tts.is_configured and tts.check_quota():
+                    tts_ctx = await tts.synthesize_stream()
 
+                # 构建消息
+                if frame_data:
+                    messages = _build_vl_messages(context, user_text, frame_data["frame"])
+                    vl_stream = vl.chat_stream(messages)
+                else:
+                    messages = _build_text_messages(context, user_text)
+                    vl_stream = vl.chat_stream(messages)
+
+                # 句子缓冲（攒到句末标点才 flush TTS）
+                sentence_buf = ""
+                audio_chunk_count = 0
+
+                async def on_tts_audio(mp3_b64: str):
+                    nonlocal audio_chunk_count
+                    audio_chunk_count += 1
+                    await sse_queue.put({
+                        "event": "audio",
+                        "data": json.dumps({"audio": mp3_b64, "index": audio_chunk_count}),
+                    })
+
+                # 如果 TTS 未启动，把回调设为空
+                if tts_ctx is None:
+                    async def noop_b64(_b: str): pass
+                    on_audio = noop_b64
+                else:
+                    tts_ctx._on_audio = on_tts_audio
+                    on_audio = on_tts_audio
+
+                # ── VL token 主循环 ───────────────────────────────
+                async for token in vl_stream:
+                    full_text += token
+                    sentence_buf += token
+
+                    # 实时推送文本给前端
+                    await sse_queue.put({
+                        "event": "text",
+                        "data": json.dumps({"text": token, "is_final": False}),
+                    })
+
+                    # 实时追加到 TTS
+                    if tts_ctx is not None:
+                        await tts_ctx.append_text(token)
+
+                    # 检测句子结束 → flush TTS 合成该句
+                    if token in "。！？.!?" and tts_ctx is not None:
+                        await tts_ctx.flush()
+                        await asyncio.sleep(0.05)  # 让音频先推送出去
+
+                # 最后一次 flush（TTS 缓冲中残留的文本）
+                if tts_ctx is not None:
+                    await tts_ctx.finish()
+                    total_audio_chunks = audio_chunk_count
+
+                session.add_message("user", user_text)
+                session.add_message("assistant", full_text)
+                session.transcribed_text = ""
+                session.touch()
+
+            except Exception as e:
+                print(f"[SSE] Stream inference error: {e}")
+                full_text = f"推理异常：{e}"
+                if tts_ctx is not None:
+                    await tts_ctx.close()
+
+        # ── 推送结束事件 ───────────────────────────────────────
         await sse_queue.put({
             "event": "end",
-            "data": json.dumps({"full_text": full_text, "total_audio_chunks": total_chunks}),
+            "data": json.dumps({"full_text": full_text, "total_audio_chunks": total_audio_chunks}),
         })
 
         session.audio_buffer.clear()
@@ -202,6 +242,35 @@ async def trigger_session_inference(session, ctx_id: str):
             })
         except Exception:
             pass
+
+
+def _build_vl_messages(context: list[dict], prompt: str, frame_b64: str) -> list[dict]:
+    """构造 VL 消息列表（OpenAI 格式）"""
+    messages = []
+    for msg in context:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            messages.append({"role": role, "content": content})
+        elif isinstance(content, list):
+            messages.append({"role": role, "content": content})
+    messages.append({
+        "role": "user",
+        "content": [
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{frame_b64}"}},
+            {"type": "text", "text": prompt},
+        ],
+    })
+    return messages
+
+
+def _build_text_messages(context: list[dict], prompt: str) -> list[dict]:
+    """构造纯文本消息列表（OpenAI 格式）"""
+    messages = []
+    for msg in context:
+        messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
+    messages.append({"role": "user", "content": prompt})
+    return messages
 
 
 async def _do_backend_asr(session) -> str:
