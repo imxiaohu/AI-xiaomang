@@ -1,16 +1,11 @@
-"""阿里云流式TTS服务（实时语音合成 WebSocket 流式）"""
+"""阿里云流式TTS服务（智能语音交互 实时语音合成 WebSocket 流式）"""
 import base64
-import hashlib
-import hmac
 import json
 import time
-import asyncio
 import websockets
 from typing import Callable
 import httpx
 from config import (
-    ALIYUN_ACCESS_KEY_ID,
-    ALIYUN_ACCESS_KEY_SECRET,
     ALIYUN_TTS_APP_KEY,
     ALIYUN_REGION,
     DAILY_TTS_QUOTA,
@@ -23,18 +18,18 @@ _daily_tts_usage = 0.0
 
 class AliyunTTS:
     """
-    阿里云实时流式TTS服务
+    阿里云智能语音交互 — 实时流式语音合成
 
-    通过 WebSocket 连接流式TTS服务，边合成边通过回调推送MP3分片。
-    同时支持短文本 HTTP API 作为备选。
+    认证方式：AppKey（项目 AppKey）+ Token
+    Token 获取：阿里云控制台 → 语音服务 → 项目管理 → 复制 Token
+    若不填 Token 则走匿名调用。
 
     文档：https://help.aliyun.com/zh/model-studio/realtime-tts-user-guide/
     """
 
-    def __init__(self):
+    def __init__(self, token: str = ""):
         self._app_key = ALIYUN_TTS_APP_KEY
-        self._access_key = ALIYUN_ACCESS_KEY_ID
-        self._secret = ALIYUN_ACCESS_KEY_SECRET
+        self._token = token
         self._region = ALIYUN_REGION
 
     def check_quota(self) -> bool:
@@ -48,7 +43,7 @@ class AliyunTTS:
 
     @property
     def is_configured(self) -> bool:
-        return bool(self._app_key and self._access_key and self._secret)
+        return bool(self._app_key)
 
     async def synthesize_stream(
         self,
@@ -56,27 +51,24 @@ class AliyunTTS:
         on_chunk: Callable[[str, int], None],
     ):
         """
-        流式合成（WebSocket实时TTS）
+        流式合成（WebSocket 实时 TTS）
         text: 完整文本
         on_chunk: 回调，接收 (mp3_base64, chunk_index)
 
-        注意：阿里云实时TTS要求单次请求文本不少于5字。
+        注意：阿里云实时 TTS 要求单次请求文本不少于5字。
         """
         if not self.is_configured:
-            raise RuntimeError("Aliyun TTS credentials not configured")
+            raise RuntimeError("ALIYUN_TTS_APP_KEY not configured")
 
         if not self.check_quota():
             raise RuntimeError("Daily TTS quota exceeded")
 
-        # 按句子分句，每句>=5字
         sentences = self._split_sentences(text)
         chunk_index = 0
-        total_chars = 0
 
         for sentence in sentences:
             if len(sentence.strip()) < 5:
                 continue
-            total_chars += len(sentence)
 
             mp3_base64 = await self._synthesize_ws(sentence)
             if mp3_base64:
@@ -92,28 +84,19 @@ class AliyunTTS:
         if not self._app_key:
             return None
 
-        # ── 生成签名 URL ──────────────────────────────────────────────
-        # 阿里云流式TTS WebSocket 鉴权文档：
-        # https://help.aliyun.com/zh/model-studio/realtime-tts-user-guide/
         timestamp = int(time.time() * 1000)
-        query_params = (
-            f"appkey={self._app_key}"
-            f"&token="
-            f"&v=2"
-            f"&ts={timestamp}"
-            f"&region={self._region}"
-        )
-
-        # 简化鉴权（正式环境请按阿里云文档生成 Token 或使用 STS 鉴权）
-        # 此处使用 appkey + timestamp 基础鉴权，production 应启用 Token
-        url = (
-            f"wss://nls-gateway-{self._region}.aliyuncs.com/ws/v1/tts"
-            f"?{query_params}"
-        )
+        params = [
+            ("appkey", self._app_key),
+            ("token", self._token),
+            ("v", "2"),
+            ("ts", str(timestamp)),
+            ("region", self._region),
+        ]
+        query = "&".join(f"{k}={v}" for k, v in params if v)
+        url = f"wss://nls-gateway-{self._region}.aliyuncs.com/ws/v1/tts?{query}"
 
         try:
             async with websockets.connect(url, ping_interval=None) as ws:
-                # 发送开始请求
                 start_req = {
                     "appkey": self._app_key,
                     "text": sentence,
@@ -130,10 +113,9 @@ class AliyunTTS:
                     if isinstance(msg, bytes):
                         mp3_chunks.append(msg)
                     else:
-                        # 控制帧
                         try:
                             ctrl = json.loads(msg)
-                            if ctrl.get("code") != 200000000:
+                            if ctrl.get("code", 0) != 200000000:
                                 print(f"[AliyunTTS] Ctrl: {ctrl}")
                         except json.JSONDecodeError:
                             pass
@@ -148,13 +130,16 @@ class AliyunTTS:
 
     async def _synthesize_http(self, sentence: str) -> str | None:
         """
-        HTTP API 合成（备选，适合短文本）
-        endpoint: POST /stream/v1/tts
+        HTTP API 合成（备选，适合短文本）。
+        认证：AppKey 同上，Token 可选。
         """
         if not self._app_key:
             return None
 
         headers = {"Content-Type": "application/json"}
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
+
         payload = {
             "appkey": self._app_key,
             "text": sentence,
