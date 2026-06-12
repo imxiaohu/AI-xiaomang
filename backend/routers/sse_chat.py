@@ -6,7 +6,7 @@ from typing import AsyncGenerator
 from fastapi import APIRouter, Query, HTTPException
 from fastapi.responses import StreamingResponse
 from sse_starlette.sse import EventSourceResponse
-from config import SSE_HEARTBEAT_INTERVAL, DEBUG, ALIYUN_ASR_APP_KEY
+from config import SSE_HEARTBEAT_INTERVAL, DEBUG, DASHSCOPE_API_KEY
 from services.session_manager import session_manager
 from services.aliyun_vl import AliyunVL
 from services.aliyun_tts import AliyunTTS
@@ -207,9 +207,9 @@ async def trigger_session_inference(session, ctx_id: str):
 async def _do_backend_asr(session) -> str:
     """
     若客户端未做 ASR（session.transcribed_text 为空），
-    则从 session.audio_buffer 合并 PCM，调用阿里云 ASR 识别。
+    则从 session.audio_buffer 合并 PCM，调用阿里云 DashScope 实时 ASR 识别。
     """
-    if not ALIYUN_ASR_APP_KEY:
+    if not DASHSCOPE_API_KEY:
         return ""
 
     try:
@@ -218,13 +218,13 @@ async def _do_backend_asr(session) -> str:
 
         asr = AliyunASR()
 
-        async def on_text(text: str):
+        async def on_final(text: str):
             nonlocal transcribed
             transcribed = text
 
-        await asr.connect(on_text)
-        await asr.send_audio_raw(combined_pcm)
-        await asyncio.sleep(5)
+        await asr.connect(on_final=on_final)
+        await asr.send_audio(combined_pcm)
+        await asyncio.sleep(6)
         await asr.close()
 
         return transcribed
