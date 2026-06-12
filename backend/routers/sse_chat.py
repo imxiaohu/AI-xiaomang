@@ -27,7 +27,7 @@ async def sse_event_stream(ctx_id: str, token: str) -> AsyncGenerator[dict, None
         yield {"event": "error", "data": json.dumps({"code": "invalid_params", "message": err_msg})}
         return
 
-    session = await session_manager.get(ctx_id)
+    session = await session_manager.get_or_create(ctx_id)
     if not session:
         yield {"event": "error", "data": json.dumps({"code": "invalid_session", "message": "会话不存在或已过期"})}
         return
