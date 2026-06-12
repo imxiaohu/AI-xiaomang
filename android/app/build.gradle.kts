@@ -5,7 +5,7 @@ plugins {
 }
 
 android {
-    namespace = "com.example.ai_video"
+    namespace = "com.xiaohu.aiXiaomang"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
     // tflite_flutter 0.12.1 (LiteRT 1.4.0) 需要 compileSdk 36+
@@ -21,7 +21,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.example.ai_video"
+        applicationId = "com.xiaohu.aiXiaomang"
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode

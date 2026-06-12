@@ -11,6 +11,7 @@ import '../services/audio_player_service.dart';
 import '../services/connectivity_service.dart';
 import '../services/offline_ai_engine.dart';
 import '../services/background_audio_service.dart';
+import '../services/wake_word_service.dart';
 import '../utils/tts_service.dart';
 import '../config/env_config.dart';
 
@@ -118,6 +119,25 @@ class AppState extends ChangeNotifier {
   TtsService? _ttsService;
   OfflineAIEngine? _offlineEngine;
   BackgroundAudioService? _backgroundService;
+  WakeWordService? _wakeWordService;
+  bool _wakeWordEnabled = true;
+
+  // ==============================
+  // TTS 音色偏好
+  // ==============================
+  String _selectedVoice = 'Cherry';
+  String get selectedVoice => _selectedVoice;
+  bool get wakeWordEnabled => _wakeWordEnabled;
+
+  void setVoice(String voice) {
+    _selectedVoice = voice;
+    notifyListeners();
+  }
+
+  void setWakeWordEnabled(bool enabled) {
+    _wakeWordEnabled = enabled;
+    notifyListeners();
+  }
 
   // ==============================
   // 互斥锁
@@ -175,6 +195,15 @@ class AppState extends ChangeNotifier {
     _backgroundService!.onError = (e) {
       debugPrint('[AppState] Background service error: $e');
     };
+
+    // 初始化唤醒词检测（Vosk Grammar Mode）
+    _wakeWordService = WakeWordService();
+    _wakeWordService!.onWakeWordDetected = _onWakeWordDetected;
+    try {
+      await _wakeWordService!.start();
+    } catch (e) {
+      debugPrint('[AppState] WakeWordService init failed: $e');
+    }
 
     // 初始化离线AI引擎
     _offlineEngine = OfflineAIEngine();
@@ -315,6 +344,13 @@ class AppState extends ChangeNotifier {
     // 不自动切换，等SSE重连逻辑处理
   }
 
+  void _onWakeWordDetected() {
+    if (_aiStatus == AiStatus.idle && _wakeWordEnabled) {
+      debugPrint('[AppState] Wake word triggered, starting listening...');
+      startListening();
+    }
+  }
+
   // ==============================
   // 麦克风长按开始
   // ==============================
@@ -359,6 +395,9 @@ class AppState extends ChangeNotifier {
 
     _audioRecorder?.stopRecording();
     _videoCapture?.stopCapture();
+
+    // 暂停唤醒词检测，避免 AI 思考/说话期间误触发
+    _wakeWordService?.pause();
 
     _processInference();
   }
@@ -446,6 +485,8 @@ class AppState extends ChangeNotifier {
     _resetIdleTimer();
     // 停止后台保活（idle状态节能）
     _backgroundService?.stop();
+    // 恢复唤醒词检测
+    _wakeWordService?.resume();
     notifyListeners();
   }
 
@@ -568,6 +609,7 @@ class AppState extends ChangeNotifier {
     _ttsService?.dispose();
     _offlineEngine?.dispose();
     _backgroundService?.dispose();
+    _wakeWordService?.dispose();
     _cameraController?.dispose();
     super.dispose();
   }
