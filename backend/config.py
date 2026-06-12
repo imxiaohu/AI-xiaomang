@@ -15,6 +15,13 @@ ALIYUN_ASR_APP_KEY = os.getenv('ALIYUN_ASR_APP_KEY', '')
 # 通义千问VL
 DASHSCOPE_API_KEY = os.getenv('DASHSCOPE_API_KEY', '')
 
+# 系统提示词（用于显式上下文缓存标记）
+# 占位符 {round} 会替换为当前对话轮次
+SYSTEM_PROMPT = os.getenv(
+    'SYSTEM_PROMPT',
+    '你是一位多模态AI助手，拥有视觉理解能力。你可以看图说话、回答问题、进行有深度的分析。',
+)
+
 # TTS
 ALIYUN_TTS_APP_KEY = os.getenv('ALIYUN_TTS_APP_KEY', '')
 

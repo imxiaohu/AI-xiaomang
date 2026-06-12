@@ -12,8 +12,8 @@ class Session:
         self.ctx_id = ctx_id
         self.created_at = time.time()
         self.last_active = time.time()
-        # 对话上下文：list of {"role": "user"/"assistant", "content": str}
-        self.messages: list[dict[str, str]] = []
+        # 对话上下文：每条 { "role": "user"|"assistant", "content": str 或 list }
+        self.messages: list[dict[str, Any]] = []
         # 当前推理轮次（用于判断是否结束）
         self.turn_active = False
         # SSE队列
@@ -30,9 +30,12 @@ class Session:
     def touch(self):
         self.last_active = time.time()
 
-    def add_message(self, role: str, content: str, image: str | None = None):
-        """添加消息，截断超长上下文"""
-        msg = {"role": role, "content": content}
+    def add_message(self, role: str, content: str | list[dict], image: str | None = None):
+        """
+        添加消息，截断超长上下文。
+        content: str（纯文本消息）或 list（多模态消息，含图片）
+        """
+        msg: dict[str, Any] = {"role": role, "content": content}
         if image:
             msg["image"] = image
         self.messages.append(msg)
@@ -42,10 +45,16 @@ class Session:
             if self.messages:
                 self.messages.pop(0)
 
+    @property
+    def round_count(self) -> int:
+        """当前对话轮次（assistant消息数量）"""
+        return sum(1 for m in self.messages if m.get("role") == "assistant")
+
     def is_expired(self) -> bool:
         return time.time() - self.last_active > SESSION_TIMEOUT
 
-    def get_context(self) -> list[dict[str, str]]:
+    def get_context(self) -> list[dict[str, Any]]:
+        """返回最近 MAX_CONTEXT_ROUNDS 轮对话（不含 system prompt）"""
         return self.messages[-MAX_CONTEXT_ROUNDS * 2:]
 
 

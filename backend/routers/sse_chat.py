@@ -152,22 +152,25 @@ async def trigger_session_inference(session, ctx_id: str):
 
         # ── 真实推理：VL 流式 + TTS 流式 ───────────────────────
         else:
+            from services.aliyun_vl import build_streaming_messages
+
             tts_ctx = None
             try:
-                # 启动 TTS 流式连接（在 VL 之前，确保音频先就绪）
+                # 启动 TTS 流式连接
                 if tts.is_configured and tts.check_quota():
                     tts_ctx = await tts.synthesize_stream()
 
-                # 构建消息
+                round_count = session.round_count
+
+                # 构建消息（含 cache_control 标记）
                 if frame_data:
-                    messages = _build_vl_messages(context, user_text, frame_data["frame"])
-                    vl_stream = vl.chat_stream(messages)
+                    messages = build_streaming_messages(
+                        context, user_text, frame_data["frame"], round_count
+                    )
                 else:
-                    messages = _build_text_messages(context, user_text)
-                    vl_stream = vl.chat_stream(messages)
+                    messages = build_streaming_messages(context, user_text, None, round_count)
 
                 # 句子缓冲（攒到句末标点才 flush TTS）
-                sentence_buf = ""
                 audio_chunk_count = 0
 
                 async def on_tts_audio(mp3_b64: str):
@@ -178,7 +181,6 @@ async def trigger_session_inference(session, ctx_id: str):
                         "data": json.dumps({"audio": mp3_b64, "index": audio_chunk_count}),
                     })
 
-                # 如果 TTS 未启动，把回调设为空
                 if tts_ctx is None:
                     async def noop_b64(_b: str): pass
                     on_audio = noop_b64
@@ -187,9 +189,8 @@ async def trigger_session_inference(session, ctx_id: str):
                     on_audio = on_tts_audio
 
                 # ── VL token 主循环 ───────────────────────────────
-                async for token in vl_stream:
+                async for token in vl.chat_stream(messages):
                     full_text += token
-                    sentence_buf += token
 
                     # 实时推送文本给前端
                     await sse_queue.put({
@@ -201,12 +202,12 @@ async def trigger_session_inference(session, ctx_id: str):
                     if tts_ctx is not None:
                         await tts_ctx.append_text(token)
 
-                    # 检测句子结束 → flush TTS 合成该句
+                    # 句子结束 → flush TTS
                     if token in "。！？.!?" and tts_ctx is not None:
                         await tts_ctx.flush()
-                        await asyncio.sleep(0.05)  # 让音频先推送出去
+                        await asyncio.sleep(0.05)
 
-                # 最后一次 flush（TTS 缓冲中残留的文本）
+                # 最后一次 flush
                 if tts_ctx is not None:
                     await tts_ctx.finish()
                     total_audio_chunks = audio_chunk_count
@@ -242,35 +243,6 @@ async def trigger_session_inference(session, ctx_id: str):
             })
         except Exception:
             pass
-
-
-def _build_vl_messages(context: list[dict], prompt: str, frame_b64: str) -> list[dict]:
-    """构造 VL 消息列表（OpenAI 格式）"""
-    messages = []
-    for msg in context:
-        role = msg.get("role", "user")
-        content = msg.get("content", "")
-        if isinstance(content, str):
-            messages.append({"role": role, "content": content})
-        elif isinstance(content, list):
-            messages.append({"role": role, "content": content})
-    messages.append({
-        "role": "user",
-        "content": [
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{frame_b64}"}},
-            {"type": "text", "text": prompt},
-        ],
-    })
-    return messages
-
-
-def _build_text_messages(context: list[dict], prompt: str) -> list[dict]:
-    """构造纯文本消息列表（OpenAI 格式）"""
-    messages = []
-    for msg in context:
-        messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
-    messages.append({"role": "user", "content": prompt})
-    return messages
 
 
 async def _do_backend_asr(session) -> str:
