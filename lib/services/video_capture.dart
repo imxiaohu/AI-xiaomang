@@ -14,8 +14,10 @@ class VideoCaptureService {
   CameraController? _controller;
   Timer? _captureTimer;
   bool _isCapturing = false;
+  bool _switchingCameras = false;
   int _frameIndex = 0;
   Uint8List? _latestFrame;
+  http.Client? _httpClient;
 
   static const int _captureIntervalMs = 800;
   static const int _targetWidth = 640;
@@ -51,7 +53,6 @@ class VideoCaptureService {
 
     try {
       await _controller!.initialize();
-      // 设置帧分辨率（CameraController不直接支持，但底层会按ResolutionPreset采集）
       onCameraReady?.call();
     } catch (e) {
       onError?.call('摄像头初始化失败: $e');
@@ -81,6 +82,11 @@ class VideoCaptureService {
   /// 切换前后摄像头
   Future<void> switchCamera(List<CameraDescription> cameras) async {
     if (cameras.length < 2) return;
+
+    // 切换期间停止抽帧，防止 timer callback 触发 takePicture
+    _switchingCameras = true;
+    stopCapture();
+
     final currentDir = _controller?.description.lensDirection;
     final nextDir = currentDir == CameraLensDirection.back
         ? CameraLensDirection.front
@@ -99,8 +105,8 @@ class VideoCaptureService {
     );
     await _controller!.initialize();
 
+    _switchingCameras = false;
     if (_isCapturing) {
-      stopCapture();
       startCapture();
     }
   }
@@ -114,14 +120,18 @@ class VideoCaptureService {
   }
 
   Future<void> _captureFrame() async {
-    if (!_isCapturing || _controller == null || !_controller!.value.isInitialized) return;
+    // 切换摄像头期间跳过，防止 takePicture 在已 dispose 的 controller 上调用
+    if (!_isCapturing || _switchingCameras) return;
+    if (_controller == null || !_controller!.value.isInitialized) return;
     _frameIndex++;
 
     try {
       final xFile = await _controller!.takePicture();
+      // takePicture 成功后再次检查状态，防止 dispose 后回调触发
+      if (_switchingCameras || !_isCapturing) return;
+
       final originalBytes = await xFile.readAsBytes();
 
-      // 压缩到640x480，JPG质量65
       final compressed = await ImageCompressor.compress(
         originalBytes,
         width: _targetWidth,
@@ -129,6 +139,7 @@ class VideoCaptureService {
         quality: _jpegQuality,
       );
 
+      if (!_isCapturing) return;
       onFrameCaptured?.call(compressed);
       _latestFrame = compressed;
       await _uploadFrame(compressed);
@@ -138,10 +149,11 @@ class VideoCaptureService {
   }
 
   Future<void> _uploadFrame(Uint8List jpgBytes) async {
+    if (_disposed) return;
     final encoded = base64Encode(jpgBytes);
     try {
-      final client = http.Client();
-      await client.post(
+      _httpClient ??= http.Client();
+      await _httpClient!.post(
         Uri.parse('$baseUrl/upload/frame'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
@@ -150,9 +162,10 @@ class VideoCaptureService {
           'index': _frameIndex,
         }),
       );
-      client.close();
     } catch (_) {}
   }
+
+  bool _disposed = false;
 
   /// 最新一帧的JPG数据（供离线VL推理使用）
   Uint8List? getLatestFrame() => _latestFrame;
@@ -160,9 +173,11 @@ class VideoCaptureService {
   CameraController? get controller => _controller;
 
   Future<void> dispose() async {
+    _disposed = true;
     stopCapture();
     await _controller?.dispose();
     _controller = null;
+    _httpClient?.close();
+    _httpClient = null;
   }
 }
-

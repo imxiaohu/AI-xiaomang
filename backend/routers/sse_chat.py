@@ -116,10 +116,14 @@ async def trigger_session_inference(session, ctx_id: str):
     - TTS 通过 input_text.append 实时合成音频（几乎同步播放）
     - 两者并行，音频紧跟文本
     """
+    # 强制刷新 sse_queue 引用，防止 SSE 重连后 queue 被覆盖但旧 task 仍写旧 queue
     sse_queue = session.sse_queue
     if sse_queue is None:
         sse_queue = asyncio.Queue()
         session.sse_queue = sse_queue
+
+    # 写入前再次确认引用是最新的（处理并发覆盖场景）
+    sse_queue = session.sse_queue
 
     if session.inference_task and not session.inference_task.done():
         session.inference_task.cancel()

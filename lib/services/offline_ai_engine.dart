@@ -140,7 +140,7 @@ class OfflineAIEngine {
 
   Future<void> _loadVL() async {
     try {
-      final modelPath = await _getModelPath('models/Qwen2-VL-2B-Q4_K_M.gguf');
+      final modelPath = await _getModelPath('models/Qwen-VL-2B-Q4_K_M.gguf');
       if (modelPath == null) {
         debugPrint('[OfflineAIEngine] VL model not found, simulation mode');
         _simulationMode = true;
@@ -178,7 +178,7 @@ class OfflineAIEngine {
   }
 
   Future<String?> _getModelPath(String assetPath) async {
-    // assetPath 格式: "models/Qwen2-VL-2B-Q4_K_M.gguf" 或 "whisper-tiny.tflite"
+    // assetPath 格式: "models/Qwen-VL-2B-Q4_K_M.gguf" 或 "whisper-tiny.tflite"
     // 优先从用户私有目录加载（支持运行时下载更新），fallback 到 assets 打包
     try {
       final appDir = await getApplicationDocumentsDirectory();

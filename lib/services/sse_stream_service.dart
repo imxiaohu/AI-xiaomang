@@ -67,12 +67,14 @@ class SseStreamService {
       _startHeartbeat();
       onConnected?.call();
 
+      _subscription?.cancel();
       _subscription = stream.listen(
         (data) => _handleData(utf8.decode(data)),
         onError: _handleError,
         onDone: _handleDone,
       );
     } catch (e) {
+      debugPrint('[SSE] connect error: $e');
       _scheduleReconnect();
     }
   }
@@ -242,15 +244,35 @@ class SseStreamService {
   }
 
   /// 结束当前推理轮次
-  Future<void> endTurn() async {
+  Future<void> endTurn({String? voice}) async {
     if (_disposed || _client == null) return;
     try {
+      final body = voice != null
+          ? jsonEncode({'ctxId': sessionId, 'voice': voice})
+          : jsonEncode({'ctxId': sessionId});
       await _client!.post(
         Uri.parse('$baseUrl/upload/chat/end'),
         headers: {'Content-Type': 'application/json'},
+        body: body,
+      );
+    } catch (e) {
+      debugPrint('[SSE] endTurn error: $e');
+      rethrow;
+    }
+  }
+
+  /// 打断推理：取消当前 inference_task，清空音频队列
+  Future<void> cancelInference() async {
+    if (_disposed || _client == null) return;
+    try {
+      await _client!.post(
+        Uri.parse('$baseUrl/upload/cancel'),
+        headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'ctxId': sessionId}),
       );
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('[SSE] cancelInference error: $e');
+    }
   }
 
   /// 断开连接
@@ -266,4 +288,3 @@ class SseStreamService {
 
   void dispose() => disconnect();
 }
-

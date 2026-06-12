@@ -279,6 +279,9 @@ class AppState extends ChangeNotifier {
     };
     _sseService!.onEnd = (end) {
       _resetIdleTimer();
+      if (_aiStatus == AiStatus.thinking || _aiStatus == AiStatus.speaking) {
+        goIdle();
+      }
     };
     _sseService!.onQuotaExceeded = (_) {
       _runMode = AppRunMode.offlineLocal;
@@ -363,9 +366,17 @@ class AppState extends ChangeNotifier {
   void _processInference() async {
     if (_runMode == AppRunMode.cloudAliyun) {
       // 云端推理：通过SSE接收流式结果
-      _sseService?.endTurn();
-      // 等待SSE推送（thinking状态保持）
-      // 用户提问文本在SSE onText -> currentStreamingText -> addAiMessage 中处理
+      try {
+        await _sseService?.endTurn(voice: _selectedVoice).timeout(
+          const Duration(seconds: 5),
+          onTimeout: () => debugPrint('[AppState] endTurn timeout'),
+        );
+      } catch (e) {
+        debugPrint('[AppState] endTurn error: $e');
+        if (_disposed) return;
+        addAiMessage('连接后端失败，请检查网络');
+        goIdle();
+      }
     } else {
       // 离线推理：Whisper ASR + Qwen-VL 视觉理解 + 本地回答
       try {
