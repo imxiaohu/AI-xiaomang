@@ -17,11 +17,21 @@ from utils.cors import build_sse_headers, validate_session_params
 router = APIRouter(prefix="/sse", tags=["sse"])
 
 
-async def sse_event_stream(ctx_id: str, token: str) -> AsyncGenerator[dict, None]:
+async def sse_event_stream(
+    ctx_id: str,
+    token: str,
+    last_event_id: int = 0,
+) -> AsyncGenerator[dict, None]:
     """
-    SSE事件流生成器
+    SSE事件流生成器（基于 EventBus）
+
     事件类型（VL+TTS模式）：text / audio / end / heartbeat / error / quota_exceeded
     事件类型（Omni模式）：omni_audio / omni_speech_started / omni_speech_stopped / text / end / heartbeat / error
+
+    Args:
+        last_event_id: Last-Event-ID 续传起点（query 参数）。
+                      0 表示从当前位置之后开始（新订阅者默认行为）。
+                      >0 表示从该 event_id 之后开始重放。
     """
     is_valid, err_msg = validate_session_params(ctx_id, token)
     if not is_valid:
@@ -33,20 +43,32 @@ async def sse_event_stream(ctx_id: str, token: str) -> AsyncGenerator[dict, None
         yield {"event": "error", "data": json.dumps({"code": "invalid_session", "message": "会话不存在或已过期"})}
         return
 
-    sse_queue: asyncio.Queue[dict] = asyncio.Queue()
-    session.sse_queue = sse_queue
+    # 注册新订阅者到 EventBus
+    # 关键修复：SSE 断开时不再取消推理任务 —— 推理继续完成，事件写入总线
+    # 新连接通过 last_event_id 续传
+    sid = session.register_sse_subscriber()
+    if last_event_id > 0:
+        # 续传：从 last_event_id 之后开始重放
+        initial_last_id = last_event_id
+    else:
+        # 全新连接：从当前位置之后开始（新订阅者不重放过老历史）
+        initial_last_id = session.event_bus.get_subscriber_position(sid)
 
     async def heartbeat():
         while True:
             await asyncio.sleep(SSE_HEARTBEAT_INTERVAL)
             try:
-                await asyncio.wait_for(sse_queue.put({"event": "heartbeat", "data": "ping"}), timeout=1.0)
+                await asyncio.wait_for(
+                    session.event_bus.publish({"event": "heartbeat", "data": "ping"}),
+                    timeout=1.0,
+                )
             except asyncio.TimeoutError:
                 pass
 
     heartbeat_task = asyncio.create_task(heartbeat())
 
     # Omni 模式：不在此处启动推理，等 upload/chat/end 触发
+    # VL+TTS 模式：保留原行为（首次连接自动触发）
     inference_task: asyncio.Task | None = None
     if not OMNI_MODE:
         async def run_inference():
@@ -56,20 +78,31 @@ async def sse_event_stream(ctx_id: str, token: str) -> AsyncGenerator[dict, None
         session.inference_task = inference_task
 
     try:
-        while True:
-            event = await sse_queue.get()
-            yield event
+        # 从 EventBus 订阅事件流（自动支持 Last-Event-ID 重放）
+        async for eid, event in session.event_bus.subscribe(sid, last_id=initial_last_id):
+            # 事件 = {"event": "text", "data": "..."}
+            # yield 时附加 id 字段，方便客户端记录 Last-Event-ID
+            yield {"id": str(eid), "event": event["event"], "data": event["data"]}
+            # 每 16 个事件 trim 一次（避免每个事件都 trim 加锁开销）
+            if eid % 16 == 0:
+                await session.event_bus.trim()
     except asyncio.CancelledError:
-        if inference_task:
-            inference_task.cancel()
+        # 关键修复：SSE 断开时不再取消推理任务
+        # 让推理继续完成，把事件写入 EventBus
+        # 新连接会通过 last_event_id 续传
         raise
     finally:
         heartbeat_task.cancel()
-        if inference_task:
-            try:
-                await inference_task
-            except asyncio.CancelledError:
-                pass
+        session.unregister_sse_subscriber(sid)
+        # 清理后做一次 trim（释放当前订阅者确认的事件）
+        try:
+            await session.event_bus.trim()
+        except Exception:
+            pass
+        # 仅在 VL+TTS 模式下管理 inference_task
+        if inference_task and not OMNI_MODE:
+            # 不取消，让它自然完成（事件会进 EventBus）
+            pass
 
 
 def _split_sentences_for_sse(text: str) -> list[str]:
@@ -109,17 +142,16 @@ def _mock_text_response(question: str) -> str:
 async def trigger_session_inference(session, ctx_id: str):
     """
     共享推理函数：被 SSE 事件流、/chat/infer、/upload/chat/end 调用。
-    从 session 取出音频/帧/文本，执行 VL 流式推理 + TTS 流式合成，结果写入 session.sse_queue。
+    从 session 取出音频/帧/文本，执行 VL 流式推理 + TTS 流式合成，
+    结果通过 session.event_bus.publish 推送（支持 Last-Event-ID 续传）。
 
     核心设计：
     - VL 通过 SSE 实时推送 token（用户看到打字机效果）
     - TTS 通过 input_text.append 实时合成音频（几乎同步播放）
     - 两者并行，音频紧跟文本
+    - 事件写入 EventBus：SSE 断开不会丢失，新连接可续传
     """
-    sse_queue = session.sse_queue
-    if sse_queue is None:
-        sse_queue = asyncio.Queue()
-        session.sse_queue = sse_queue
+    event_bus = session.event_bus
 
     if session.inference_task and not session.inference_task.done():
         session.inference_task.cancel()
@@ -127,6 +159,10 @@ async def trigger_session_inference(session, ctx_id: str):
             await session.inference_task
         except asyncio.CancelledError:
             pass
+
+    # 同步设置 turn_start_id：让任何后续才连上的 SSE 订阅者从本轮开始重放
+    # 修复"客户端先发 /chat/infer 或 /chat/end、后连 SSE"导致的竞态
+    session.turn_start_id = event_bus.next_id
 
     full_text = ""
     total_audio_chunks = 0
@@ -149,7 +185,7 @@ async def trigger_session_inference(session, ctx_id: str):
         if DEBUG:
             full_text = _mock_vl_response(user_text)
             for sent in _split_sentences_for_sse(full_text):
-                await sse_queue.put({
+                await event_bus.publish({
                     "event": "text",
                     "data": json.dumps({"text": sent, "is_final": False}),
                 })
@@ -182,7 +218,7 @@ async def trigger_session_inference(session, ctx_id: str):
                 async def on_tts_audio(mp3_b64: str):
                     nonlocal audio_chunk_count
                     audio_chunk_count += 1
-                    await sse_queue.put({
+                    await event_bus.publish({
                         "event": "audio",
                         "data": json.dumps({"audio": mp3_b64, "index": audio_chunk_count}),
                     })
@@ -199,7 +235,7 @@ async def trigger_session_inference(session, ctx_id: str):
                     full_text += token
 
                     # 实时推送文本给前端
-                    await sse_queue.put({
+                    await event_bus.publish({
                         "event": "text",
                         "data": json.dumps({"text": token, "is_final": False}),
                     })
@@ -230,7 +266,7 @@ async def trigger_session_inference(session, ctx_id: str):
                     await tts_ctx.close()
 
         # ── 推送结束事件 ───────────────────────────────────────
-        await sse_queue.put({
+        await event_bus.publish({
             "event": "end",
             "data": json.dumps({"full_text": full_text, "total_audio_chunks": total_audio_chunks}),
         })
@@ -243,12 +279,15 @@ async def trigger_session_inference(session, ctx_id: str):
     except Exception as e:
         print(f"[SSE] Inference error: {e}")
         try:
-            await sse_queue.put({
+            await event_bus.publish({
                 "event": "error",
                 "data": json.dumps({"code": "inference_error", "message": str(e)}),
             })
         except Exception:
             pass
+    finally:
+        # 本轮结束：清零 turn_start_id，后续 SSE 订阅者不再重放本轮事件
+        session.turn_start_id = 0
 
 
 async def _do_backend_asr(session) -> str:
@@ -284,6 +323,7 @@ async def _do_backend_asr(session) -> str:
 async def sse_chat(
     ctxId: str = Query(..., description="会话ID"),
     token: str = Query(..., description="认证token"),
+    lastEventId: int = Query(0, description="Last-Event-ID 续传起点；0 表示新连接"),
 ):
     """
     SSE下行流接口
@@ -291,13 +331,22 @@ async def sse_chat(
     SSE响应头必须设置：Content-Type: text/event-stream, Cache-Control: no-cache, X-Accel-Buffering: no
     """
     async def event_generator():
-        async for event in sse_event_stream(ctxId, token):
+        async for event in sse_event_stream(ctxId, token, last_event_id=lastEventId):
             yield event
 
     return EventSourceResponse(
         event_generator(),
         headers=build_sse_headers(),
     )
+
+
+@router.get("/mode")
+async def get_mode(ctxId: str = Query(..., description="会话ID")):
+    """查询当前 Omni 交互模式"""
+    session = await session_manager.get(ctxId)
+    if not session:
+        return {"mode": "manual"}
+    return {"mode": session.interaction_mode}
 
 
 @router.post("/chat/infer")

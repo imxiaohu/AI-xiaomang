@@ -368,7 +368,7 @@ class _TripoGenerationDialogState extends State<TripoGenerationDialog> {
             ),
             decoration: InputDecoration(
               hintText: enabled ? hint : '（已禁用）',
-              hintStyle: TextStyle(color: Colors.white54, fontSize: 11),
+              hintStyle: const TextStyle(color: Colors.white54, fontSize: 11),
               prefixIcon: Icon(
                 Icons.link,
                 color: enabled ? Colors.white54 : Colors.white38,

@@ -43,16 +43,14 @@ TTS_VOICE = os.getenv('TTS_VOICE', 'Cherry')
 
 # ── Qwen-Omni-Realtime（一体化实时音视频，OMNI_MODE=true 时启用）─────
 # Omni 模型：qwen3.5-omni-plus-realtime / qwen3.5-omni-flash-realtime
-# Omni 音色：Cherry(芊悦), Serena(苏瑶), Ethan(晨煦), Chelsie(千雪), Momo(茉兔),
-#           Vivian(十三), Moon(月白), Maia(四月), Kai(凯), Nofish(不吃鱼),
-#           Bella(萌宝), Ryan(甜茶), Katerina(卡捷琳娜), Aiden(艾登),
-#           Eldric Sage(沧明子), Mia(乖小妹), Mochi(沙小弥), Bellona(燕铮莺),
-#           Vincent(田叔), Bunny(萌小姬), Neil(阿闻), Arthur(徐大爷),
-#           Nini(邻家妹妹), Seren(小婉), Pip(顽屁小孩), Stella(少女阿月)
-# 注意：OMNI_MODE=true 时覆盖 VL+TTS 分离模式，Omni 更智能但费用更高
+# 注意：voice 参数必须与模型系列匹配
+#   - qwen3.5-omni-*-realtime：默认 Tina，可选 Tina/Serena/Cindy/Ethan/Momo
+#   - qwen3-omni-flash-realtime：默认 Cherry，可选 Cherry/Serena/Ethan/Chelsie/Momo
+#   - qwen-omni-turbo-realtime：默认 Chelsie
 OMNI_MODE = os.getenv('OMNI_MODE', 'false').lower() == 'true'
 OMNI_MODEL = os.getenv('OMNI_MODEL', 'qwen3.5-omni-flash-realtime')
-OMNI_VOICE = os.getenv('OMNI_VOICE', 'Cherry')
+# ⚠️ 修复：3.5 系列不支持 Cherry，runtime 报 "Voice 'Cherry' is not supported"
+OMNI_VOICE = os.getenv('OMNI_VOICE', 'Tina')
 OMNI_INSTRUCTIONS = os.getenv(
     'OMNI_INSTRUCTIONS',
     '你是一位友好的AI助手，名叫小芒。你能用视觉理解图像，能用语音自然对话。请始终用中文回答。',
@@ -68,3 +66,7 @@ MAX_CONTEXT_ROUNDS = int(os.getenv('MAX_CONTEXT_ROUNDS', '10'))
 
 # 开发模式
 DEBUG = os.getenv('DEBUG', 'false').lower() == 'true'
+
+# 测试模式（跳过认证校验，方便本地/测试环境联调）
+# true=不校验 token，false=校验 token
+TEST_MODE = os.getenv('TEST_MODE', 'false').lower() == 'true'

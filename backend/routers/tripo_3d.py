@@ -231,12 +231,12 @@ async def multi_image_to_3d(req: MultiImageTo3DRequest, bg: BackgroundTasks):
         texture_quality=req.texture_quality,
     )
 
-    # 构建 images 参数：空对象{} → null，ImageItem → {type, file_token}
+    # 构建 images 参数：空对象{} 保持为空，ImageItem → {type, file_token}
     images_list = []
     for item in req.images:
         if isinstance(item, dict):
             # 空对象 {}
-            images_list.append(None)
+            images_list.append({})
         else:
             # ImageItem
             images_list.append({

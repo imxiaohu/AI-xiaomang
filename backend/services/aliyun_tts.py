@@ -17,7 +17,7 @@ class AliyunTTS:
 
     认证：DASHSCOPE_API_KEY（百炼平台 API Key）
     模型：qwen3-tts-flash-realtime（推荐，Qwen3-TTS 最新版）
-    协议：wss://dashscope.aliyuncs.com/api-ws/v1/inference
+    协议：wss://dashscope.aliyuncs.com/api-ws/v1/realtime
 
     commit 模式：客户端主动提交触发合成（适合对话逐轮合成）
     server_commit 模式：服务端自动处理文本分段与合成时机（适合大段文本）
@@ -107,7 +107,7 @@ class AliyunTTS:
         if not self.is_configured:
             raise RuntimeError("DASHSCOPE_API_KEY not configured")
 
-        url = "wss://dashscope.aliyuncs.com/api-ws/v1/inference"
+        url = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
         headers = {"Authorization": f"Bearer {self._api_key}"}
 
         sentences = self._split_sentences(text)
@@ -262,7 +262,7 @@ class TTSStreamContext:
 
     async def connect(self):
         """建立 WebSocket 连接并初始化会话"""
-        url = "wss://dashscope.aliyuncs.com/api-ws/v1/inference"
+        url = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
         headers = {"Authorization": f"Bearer {self._api_key}"}
 
         self._ws = await websockets.connect(
@@ -394,18 +394,12 @@ class TTSStreamContext:
 
                 msg_type = msg.get("type", "")
 
-                # 音频分片（CosyVoice v3-flash 流式分片）
+                # 音频分片（Qwen-TTS Realtime 流式分片）
                 if msg_type == "content":
                     audio_data = msg.get("audio", {})
                     data_b64 = audio_data.get("data", "")
-                    if data_b64:
-                        chunk_bytes = base64.b64decode(data_b64)
-                        if chunk_bytes:
-                            chunk_b64 = base64.b64encode(chunk_bytes).decode()
-                            if self._on_audio:
-                                self._on_audio(chunk_b64)
-                            # 估算使用量：每中文字约 0.3 秒音频
-                            self._total_chars += 0
+                    if data_b64 and self._on_audio:
+                        self._on_audio(data_b64)
 
                     # 累积二进制 MP3 数据
                     # （CosyVoice 也可能直接返回二进制帧）

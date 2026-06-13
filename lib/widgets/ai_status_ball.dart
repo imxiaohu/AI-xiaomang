@@ -7,12 +7,14 @@ import '../models/enums.dart';
 class AiStatusBall extends StatefulWidget {
   final AiStatus status;
   final AppRunMode runMode;
+  final OmniInteractionMode omniMode;
   final double ttsVolume; // 0.0~1.0，speaking状态跟随音量缩放
 
   const AiStatusBall({
     super.key,
     required this.status,
     required this.runMode,
+    this.omniMode = OmniInteractionMode.manual,
     this.ttsVolume = 0.5,
   });
 
@@ -158,7 +160,9 @@ class _AiStatusBallState extends State<AiStatusBall>
   String _getStatusText() {
     switch (widget.status) {
       case AiStatus.idle:
-        return '按住麦克风提问';
+        return widget.omniMode == OmniInteractionMode.vad
+            ? '点击麦克风开始对话'
+            : '按住麦克风提问';
       case AiStatus.listening:
         return '正在聆听你的声音…';
       case AiStatus.thinking:

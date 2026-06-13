@@ -25,6 +25,20 @@ class AppState extends ChangeNotifier {
   AppRunMode get runMode => _runMode;
 
   // ==============================
+  // Omni 交互模式
+  // ==============================
+  OmniInteractionMode _omniMode = OmniInteractionMode.manual;
+  OmniInteractionMode get omniMode => _omniMode;
+
+  Future<void> setOmniMode(OmniInteractionMode mode) async {
+    if (_omniMode == mode) return;
+    _omniMode = mode;
+    notifyListeners();
+    // 通知后端切换模式
+    await _sseService?.setMode(mode == OmniInteractionMode.vad ? 'vad' : 'manual');
+  }
+
+  // ==============================
   // AI状态
   // ==============================
   AiStatus _aiStatus = AiStatus.idle;
@@ -72,6 +86,7 @@ class AppState extends ChangeNotifier {
 
   String _currentStreamingText = '';
   String get currentStreamingText => _currentStreamingText;
+  bool _userMessageSaved = false; // 当前轮次用户转录是否已保存
 
   // ==============================
   // 录音
@@ -291,11 +306,24 @@ class AppState extends ChangeNotifier {
       }
     };
     _sseService!.onText = (chunk) {
-      _currentStreamingText += chunk.text;
+      if (chunk.source == 'user') {
+        // Omni 用户转录：覆盖式更新（后端发的是累积文本，非增量）
+        _currentStreamingText = chunk.text;
+      } else {
+        // 模型回复开始前，先保存用户转录文本
+        if (!_userMessageSaved && _currentStreamingText.isNotEmpty) {
+          addUserMessage(_currentStreamingText);
+          _currentStreamingText = '';
+          _userMessageSaved = true;
+        }
+        // 模型回复：追加式流式显示
+        _currentStreamingText += chunk.text;
+      }
       notifyListeners();
       if (chunk.isFinal) {
         addAiMessage(_currentStreamingText);
         _currentStreamingText = '';
+        _userMessageSaved = false;
         notifyListeners();
       }
     };
@@ -306,16 +334,49 @@ class AppState extends ChangeNotifier {
       _audioPlayer?.enqueuePcm(chunk.base64Audio);
     };
     _sseService!.onOmniSpeechStarted = () {
-      // Omni VAD 检测到语音开始：可更新 UI 指示器
+      // VAD 检测到语音开始
+      if (_omniMode == OmniInteractionMode.vad && _aiStatus == AiStatus.idle) {
+        _aiStatus = AiStatus.listening;
+        notifyListeners();
+      }
     };
     _sseService!.onOmniSpeechStopped = () {
-      // Omni VAD 检测到语音结束：可更新 UI 指示器
+      // VAD 检测到语音结束，进入思考
+      if (_omniMode == OmniInteractionMode.vad) {
+        _aiStatus = AiStatus.thinking;
+        notifyListeners();
+      }
     };
     _sseService!.onOmniCommitted = () {
-      // Omni 已提交音频缓冲：可显示"正在思考..."
+      // 服务端已提交音频缓冲，等待响应
     };
     _sseService!.onEnd = (end) {
-      _resetIdleTimer();
+      // 关键：end 事件到达时，把 Omni 累积的 PCM 立刻拼成 WAV 播放，
+      // 避免 < 200ms 的尾段留到下次 turn 一起播（那会延迟 200ms+）
+      _audioPlayer?.flushPending();
+      // 修复5：如果只有用户转录没有模型回复，保存为用户消息
+      if (!_userMessageSaved && _currentStreamingText.isNotEmpty) {
+        addUserMessage(_currentStreamingText);
+        _currentStreamingText = '';
+      }
+      // 如果有累积的模型流式文本但尚未保存（is_final 从未为 true），保存为AI消息
+      if (_currentStreamingText.isNotEmpty) {
+        addAiMessage(_currentStreamingText);
+        _currentStreamingText = '';
+      } else if (end.fullText != null && end.fullText!.isNotEmpty) {
+        // 兜底：用 end 事件的 full_text
+        addAiMessage(end.fullText!);
+      }
+      _userMessageSaved = false;
+      // 修复4：无音频时直接回 idle，避免卡在 speaking
+      // Omni 模式用 audioSeconds，VL+TTS 模式用 totalAudioChunks
+      if (end.audioSeconds > 0 || end.totalAudioChunks > 0) {
+        _aiStatus = AiStatus.speaking;
+        _resetIdleTimer();
+      } else {
+        _aiStatus = AiStatus.idle;
+      }
+      notifyListeners();
     };
     _sseService!.onQuotaExceeded = (_) {
       _runMode = AppRunMode.offlineLocal;
@@ -352,15 +413,31 @@ class AppState extends ChangeNotifier {
   // ==============================
   // 麦克风长按开始
   // ==============================
-  void startListening() {
+  Future<void> startListening() async {
+    // VAD 模式下长按不触发
+    if (_omniMode == OmniInteractionMode.vad) return;
+    print('[AppState] startListening entered, _aiStatus=$_aiStatus, _audioRecorder=${_audioRecorder != null}');
     if (_aiStatus != AiStatus.idle) return;
     _aiStatus = AiStatus.listening;
     _recordingSeconds = 0;
     _resetIdleTimer();
     notifyListeners();
 
+    // ⚠️ 修复：不再依赖 setMicPermission(true) 提前构造 recorder。
+    // 旧逻辑下：用户没点过权限授权按钮时 _audioRecorder 仍是 null，
+    // 整条录音链就被 ?. 短路，audio chunk 一个也上传不到后端。
+    // 现在改为懒初始化 —— 每次录音前确保实例存在。
+    if (_audioRecorder == null) {
+      _audioRecorder = AudioRecorderService(
+        baseUrl: BackendConfig.baseUrl,
+        sessionId: _sessionId,
+      );
+      print('[AppState] _audioRecorder lazily constructed');
+    }
+
     // 启动录音（云端上传分片，离线本地识别）
-    _audioRecorder?.startRecording();
+    await _audioRecorder?.startRecording();
+    print('[AppState] startRecording awaited, _isRecording=${_audioRecorder?.isRecording}');
 
     // 启动抽帧（云端模式）
     if (_runMode == AppRunMode.cloudAliyun) {
@@ -384,22 +461,66 @@ class AppState extends ChangeNotifier {
   // ==============================
   // 松手停止
   // ==============================
-  void stopListeningAndThink() {
+  Future<void> stopListeningAndThink() async {
     if (_aiStatus != AiStatus.listening) return;
     _recordingTimer?.cancel();
     _recordingSeconds = 0;
     _aiStatus = AiStatus.thinking;
     notifyListeners();
 
-    _audioRecorder?.stopRecording();
+    // 关键：必须先 await 录音器完成"最后一块 chunk + end=true"信号的上传，
+    // 再触发 endTurn，否则 session.audio_buffer 在后端可能仍为空，
+    // 导致 Omni 报 "buffer too small, or have no audio"。
+    await _audioRecorder?.stopRecording();
     _videoCapture?.stopCapture();
 
     _processInference();
   }
 
+  // ==============================
+  // VAD 模式：点击切换录音
+  // ==============================
+  Future<void> toggleVadListening() async {
+    if (_omniMode != OmniInteractionMode.vad) return;
+
+    if (_aiStatus == AiStatus.idle) {
+      // 开始持续录音
+      _aiStatus = AiStatus.listening;
+      _recordingSeconds = 0;
+      _resetIdleTimer();
+      notifyListeners();
+
+      if (_audioRecorder == null) {
+        _audioRecorder = AudioRecorderService(
+          baseUrl: BackendConfig.baseUrl,
+          sessionId: _sessionId,
+        );
+      }
+      await _audioRecorder?.startRecording();
+
+      if (_runMode == AppRunMode.cloudAliyun) {
+        _videoCapture?.startCapture();
+      }
+      _backgroundService?.start();
+
+      // VAD 模式不设自动停止计时器，由服务端 VAD 控制
+    } else if (_aiStatus == AiStatus.listening) {
+      // 手动停止录音
+      _aiStatus = AiStatus.thinking;
+      notifyListeners();
+      await _audioRecorder?.stopRecording();
+      _videoCapture?.stopCapture();
+      // 隔离上一 turn 残留的音频缓冲
+      _audioPlayer?.startNewTurn();
+      _sseService?.endTurn();
+    }
+  }
+
   void _processInference() async {
     if (_runMode == AppRunMode.cloudAliyun) {
       // 云端推理：通过SSE接收流式结果
+      // 隔离上一 turn 残留的音频缓冲
+      _audioPlayer?.startNewTurn();
       _sseService?.endTurn();
       // 等待SSE推送（thinking状态保持）
       // 用户提问文本在SSE onText -> currentStreamingText -> addAiMessage 中处理
@@ -688,7 +809,9 @@ class AppState extends ChangeNotifier {
         }
       }
       // 不足4个，补null
-      while (images.length < 4) images.add(null);
+      while (images.length < 4) {
+        images.add(null);
+      }
 
       final taskId = await _tripoService!.multiImageTo3D(images: images);
       _tripoTaskId = taskId;

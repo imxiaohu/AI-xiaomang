@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:camera/camera.dart';
 import '../providers/app_state.dart';
+import '../models/enums.dart';
 import '../widgets/status_bar.dart';
 import '../widgets/bottom_action_bar.dart';
 import '../widgets/chat_panel.dart';
@@ -96,6 +97,7 @@ class _VisualChatScreenState extends State<VisualChatScreen>
                     statusText: appState.tripoGenerating ? appState.tripoStatusText : null,
                     aiStatus: appState.aiStatus,
                     runMode: appState.runMode,
+                    omniMode: appState.omniMode,
                     ttsVolume: appState.ttsVolume,
                     hardwareInfo: appState.hardwareInfo,
                   ),
@@ -120,12 +122,19 @@ class _VisualChatScreenState extends State<VisualChatScreen>
                 child: BottomActionBar(
                   runMode: appState.runMode,
                   aiStatus: appState.aiStatus,
+                  omniMode: appState.omniMode,
                   chatPanelExpanded: appState.chatPanelExpanded,
                   recordingSeconds: appState.recordingSeconds,
                   onToggleRunMode: appState.toggleRunMode,
+                  onToggleOmniMode: () => appState.setOmniMode(
+                    appState.omniMode == OmniInteractionMode.manual
+                        ? OmniInteractionMode.vad
+                        : OmniInteractionMode.manual,
+                  ),
                   onToggleChatPanel: appState.toggleChatPanel,
                   onLongPressStart: () => appState.startListening(),
                   onLongPressEnd: () => appState.stopListeningAndThink(),
+                  onVadTap: () => appState.toggleVadListening(),
                 ),
               ),
 

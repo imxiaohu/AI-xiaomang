@@ -36,6 +36,9 @@ class TripoModelViewer extends StatefulWidget {
   /// 运行模式（传给 Ai3DBall）
   final AppRunMode runMode;
 
+  /// Omni 交互模式（传给 Ai3DBall）
+  final OmniInteractionMode omniMode;
+
   /// TTS音量（传给 Ai3DBall）
   final double ttsVolume;
 
@@ -51,6 +54,7 @@ class TripoModelViewer extends StatefulWidget {
     this.statusText,
     this.aiStatus = AiStatus.idle,
     this.runMode = AppRunMode.cloudAliyun,
+    this.omniMode = OmniInteractionMode.manual,
     this.ttsVolume = 0.5,
     this.hardwareInfo,
   });
@@ -76,6 +80,7 @@ class _TripoModelViewerState extends State<TripoModelViewer> {
       return Ai3DBall(
         status: widget.aiStatus,
         runMode: widget.runMode,
+        omniMode: widget.omniMode,
         ttsVolume: widget.ttsVolume,
         hardwareInfo: widget.hardwareInfo,
       );
@@ -250,6 +255,8 @@ class _TripoModelViewerState extends State<TripoModelViewer> {
     if (widget.isGenerating) {
       return 'AI 正在生成 3D 模型…';
     }
-    return '按住麦克风提问';
+    return widget.omniMode == OmniInteractionMode.vad
+        ? '点击麦克风开始对话'
+        : '按住麦克风提问';
   }
 }

@@ -5,8 +5,9 @@
 class SseTextChunk {
   final String text;
   final bool isFinal;
+  final String? source; // "user" | "assistant" | null
 
-  const SseTextChunk({required this.text, required this.isFinal});
+  const SseTextChunk({required this.text, required this.isFinal, this.source});
 }
 
 /// 音频分片事件（base64编码的MP3）

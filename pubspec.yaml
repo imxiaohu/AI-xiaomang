@@ -17,7 +17,10 @@ dependencies:
   camera: ^0.11.0+2
 
   # 音频播放（阿里云MP3流式播放）
-  audioplayers: ^6.0.0
+  # audioplayers: ^6.0.0
+  # 改用 just_audio：iOS 上 BytesSource 频繁切换临时文件导致卡顿，
+  # just_audio 支持 LockCaching + AudioPipeline，串行小 chunk 平滑。
+  just_audio: ^0.9.40
 
   # TTS（离线模式本地播报）
   flutter_tts: ^4.0.2

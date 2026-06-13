@@ -14,7 +14,7 @@ class AliyunASR:
     认证：DASHSCOPE_API_KEY（百炼平台 API Key）
     模型：fun-asr-realtime（Fun-ASR，支持多方言、时间戳）
           qwen3-asr-flash-realtime（Qwen-ASR，支持 VAD 断句、情绪识别）
-    协议：wss://dashscope.aliyuncs.com/api-ws/v1/inference
+    协议：wss://dashscope.aliyuncs.com/api-ws/v1/realtime
 
     Qwen-ASR VAD 模式（默认）：
       - 服务端自动检测语音起点/终点（断句），适合实时对话
@@ -54,7 +54,7 @@ class AliyunASR:
         self._text_callback = on_interim
         self._final_callback = on_final
 
-        url = "wss://dashscope.aliyuncs.com/api-ws/v1/inference"
+        url = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
         headers = {"Authorization": f"Bearer {self._api_key}"}
 
         try:
@@ -178,7 +178,7 @@ class AliyunASR:
         if self._ws:
             try:
                 # 发送停止信号
-                await self._ws.send(json.dumps({"type": "session.end"}))
+                await self._ws.send(json.dumps({"type": "session.finish"}))
                 await self._ws.close()
             except Exception:
                 pass

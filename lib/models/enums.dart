@@ -26,3 +26,9 @@ enum ConnectionStatus {
   disconnected, // 断开
   error, // 异常
 }
+
+/// Omni 交互模式
+enum OmniInteractionMode {
+  manual, // 长按发送语音（Manual 模式）
+  vad, // 自动语音检测（VAD 模式）
+}

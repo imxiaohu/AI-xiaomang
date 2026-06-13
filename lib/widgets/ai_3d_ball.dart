@@ -9,6 +9,7 @@ import '../models/hardware_info.dart';
 class Ai3DBall extends StatefulWidget {
   final AiStatus status;
   final AppRunMode runMode;
+  final OmniInteractionMode omniMode;
   final double ttsVolume;
   final HardwareInfo? hardwareInfo;
 
@@ -16,6 +17,7 @@ class Ai3DBall extends StatefulWidget {
     super.key,
     required this.status,
     required this.runMode,
+    this.omniMode = OmniInteractionMode.manual,
     this.ttsVolume = 0.5,
     this.hardwareInfo,
   });
@@ -58,6 +60,7 @@ class _Ai3DBallState extends State<Ai3DBall> {
     if (!_checked) return const SizedBox(width: 160, height: 190);
     return _Enhanced3DBall(
       status: widget.status,
+      omniMode: widget.omniMode,
       ttsVolume: widget.ttsVolume,
       use3D: _use3D,
     );
@@ -67,11 +70,13 @@ class _Ai3DBallState extends State<Ai3DBall> {
 /// 增强3D球体（2D降级+模拟3D效果的最终渲染器）
 class _Enhanced3DBall extends StatefulWidget {
   final AiStatus status;
+  final OmniInteractionMode omniMode;
   final double ttsVolume;
   final bool use3D;
 
   const _Enhanced3DBall({
     required this.status,
+    required this.omniMode,
     required this.ttsVolume,
     required this.use3D,
   });
@@ -167,7 +172,9 @@ class _Enhanced3DBallState extends State<_Enhanced3DBall>
   String _getText() {
     switch (widget.status) {
       case AiStatus.idle:
-        return '按住麦克风提问';
+        return widget.omniMode == OmniInteractionMode.vad
+            ? '点击麦克风开始对话'
+            : '按住麦克风提问';
       case AiStatus.listening:
         return '正在聆听你的声音…';
       case AiStatus.thinking:

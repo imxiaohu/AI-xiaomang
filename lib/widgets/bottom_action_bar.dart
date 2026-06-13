@@ -7,23 +7,29 @@ import '../models/enums.dart';
 class BottomActionBar extends StatelessWidget {
   final AppRunMode runMode;
   final AiStatus aiStatus;
+  final OmniInteractionMode omniMode;
   final bool chatPanelExpanded;
   final double recordingSeconds; // 当前录音秒数
   final VoidCallback onToggleRunMode;
+  final VoidCallback onToggleOmniMode;
   final VoidCallback onToggleChatPanel;
   final VoidCallback onLongPressStart;
   final VoidCallback onLongPressEnd;
+  final VoidCallback onVadTap; // VAD 模式点击
 
   const BottomActionBar({
     super.key,
     required this.runMode,
     required this.aiStatus,
+    required this.omniMode,
     required this.chatPanelExpanded,
     this.recordingSeconds = 0,
     required this.onToggleRunMode,
+    required this.onToggleOmniMode,
     required this.onToggleChatPanel,
     required this.onLongPressStart,
     required this.onLongPressEnd,
+    required this.onVadTap,
   });
 
   @override
@@ -50,7 +56,7 @@ class BottomActionBar extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.center,
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              // 左侧：模式切换小按钮（idle状态可点击）
+              // 左侧：运行模式切换（云/离线）
               _buildSmallCircleButton(
                 icon: runMode == AppRunMode.offlineLocal
                     ? Icons.memory
@@ -58,8 +64,18 @@ class BottomActionBar extends StatelessWidget {
                 onTap: aiStatus == AiStatus.idle ? onToggleRunMode : null,
                 tooltip: runMode == AppRunMode.offlineLocal ? '离线模式' : '云端模式',
               ),
-              const SizedBox(width: 32),
-              // 中心：长按录音大圆按钮
+              const SizedBox(width: 16),
+              // Omni 交互模式切换（Manual/VAD）
+              _buildSmallCircleButton(
+                icon: omniMode == OmniInteractionMode.manual
+                    ? Icons.touch_app
+                    : Icons.graphic_eq,
+                onTap: aiStatus == AiStatus.idle ? onToggleOmniMode : null,
+                tooltip: omniMode == OmniInteractionMode.manual ? '长按模式' : '自动检测',
+                isActive: omniMode == OmniInteractionMode.vad,
+              ),
+              const SizedBox(width: 16),
+              // 中心：录音大圆按钮
               _buildMicButton(),
               const SizedBox(width: 32),
               // 右侧：对话面板展开按钮
@@ -77,11 +93,12 @@ class BottomActionBar extends StatelessWidget {
     );
   }
 
-  /// 中心长按录音按钮 (直径80dp)
+  /// 中心录音按钮 (直径80dp)
   Widget _buildMicButton() {
     final isListening = aiStatus == AiStatus.listening;
     final isDisabled = aiStatus == AiStatus.thinking ||
         aiStatus == AiStatus.speaking;
+    final isVad = omniMode == OmniInteractionMode.vad;
 
     // 渐变配色
     Gradient gradient;
@@ -96,18 +113,25 @@ class BottomActionBar extends StatelessWidget {
           colors: [Color(0xff555555), Color(0xff2d2d2d)]);
     }
 
+    // VAD 模式：点击切换；Manual 模式：长按
     return GestureDetector(
-      onLongPressStart: isDisabled
-          ? null
-          : (_) {
+      onTap: isVad && !isDisabled
+          ? () {
+              HapticFeedback.mediumImpact();
+              onVadTap();
+            }
+          : null,
+      onLongPressStart: !isVad && !isDisabled
+          ? (_) {
               HapticFeedback.mediumImpact();
               onLongPressStart();
-            },
-      onLongPressEnd: isDisabled
-          ? null
-          : (_) {
+            }
+          : null,
+      onLongPressEnd: !isVad && !isDisabled
+          ? (_) {
               onLongPressEnd();
-            },
+            }
+          : null,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
         width: 80,
@@ -142,6 +166,7 @@ class BottomActionBar extends StatelessWidget {
     required IconData icon,
     VoidCallback? onTap,
     String? tooltip,
+    bool isActive = false,
   }) {
     return Tooltip(
       message: tooltip ?? '',
@@ -155,7 +180,9 @@ class BottomActionBar extends StatelessWidget {
             height: 40,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color: Colors.black.withValues(alpha: 0.35),
+              color: isActive
+                  ? const Color(0xff1976d2).withValues(alpha: 0.7)
+                  : Colors.black.withValues(alpha: 0.35),
             ),
             child: Icon(icon, color: Colors.white, size: 20),
           ),

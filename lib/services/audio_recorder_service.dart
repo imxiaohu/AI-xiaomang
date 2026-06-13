@@ -28,6 +28,8 @@ class AudioRecorderService {
   VoidCallback? onRecordingStop;
   void Function(String error)? onError;
 
+  int _lastReadOffset = 0; // track how many bytes have been read so far
+
   AudioRecorderService({required this.baseUrl, required this.sessionId});
 
   bool get isRecording => _isRecording;
@@ -48,9 +50,12 @@ class AudioRecorderService {
 
   /// 开始录音
   Future<void> startRecording() async {
+    print('[AudioRecorder] startRecording() entered, _isRecording=$_isRecording');
     if (_isRecording) return;
 
-    if (!await _recorder.hasPermission()) {
+    final hasPerm = await _recorder.hasPermission();
+    print('[AudioRecorder] hasPermission=$hasPerm');
+    if (!hasPerm) {
       onError?.call('麦克风权限未授权');
       return;
     }
@@ -61,6 +66,7 @@ class AudioRecorderService {
     final dir = await getTemporaryDirectory();
     _pcmFile = File('${dir.path}/recording_${DateTime.now().millisecondsSinceEpoch}.pcm');
     _pcmSink = _pcmFile!.openWrite();
+    print('[AudioRecorder] pcm file=${_pcmFile!.path}');
 
     // 16KHz mono PCM：每秒 32000 字节
     await _recorder.start(
@@ -72,8 +78,11 @@ class AudioRecorderService {
       ),
       path: _pcmFile!.path,
     );
+    print('[AudioRecorder] recorder.start() returned');
 
     _isRecording = true;
+    _lastReadOffset = 0;
+    print('[AudioRecorder] startRecording done, file=${_pcmFile!.path}');
     onRecordingStart?.call();
 
     // 每200ms读一次文件内容并上传
@@ -87,12 +96,21 @@ class AudioRecorderService {
     if (!_isRecording || _pcmFile == null) return;
     try {
       final stat = await _pcmFile!.stat();
-      if (stat.size < 640) return; // 不到20ms数据，跳过
-      final bytes = await _pcmFile!.readAsBytes();
+      debugPrint('[AudioRecorder] _flushChunk: size=${stat.size} lastRead=$_lastReadOffset');
+      if (stat.size <= _lastReadOffset) return; // no new data
+      final raf = await _pcmFile!.open(mode: FileMode.read);
+      await raf.setPosition(_lastReadOffset);
+      final bytes = await raf.read(stat.size - _lastReadOffset);
+      _lastReadOffset = stat.size;
+      await raf.close();
+      if (bytes.isEmpty) return;
       final encoded = base64Encode(bytes);
+      debugPrint('[AudioRecorder] uploading chunk bytes=${bytes.length} b64_len=${encoded.length}');
       onChunkReady?.call(bytes, _chunkDurationMs);
       await _uploadChunk(encoded);
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('[AudioRecorder] _flushChunk error: $e');
+    }
   }
 
   Future<void> _uploadChunk(String base64Audio) async {
@@ -111,15 +129,21 @@ class AudioRecorderService {
   /// 结束录音
   Future<void> stopRecording() async {
     if (!_isRecording) return;
-    _isRecording = false;
+    // ⚠️ 修复：不能在这里先 _isRecording = false，否则 _flushChunk 第 90 行
+    // 的 guard `if (!_isRecording) return` 会让最后一块 chunk 永远丢失，
+    // 后端 session.audio_buffer 收不到任何 audio。
+    // 改为：先 cancel timer、stop recorder，再 flush 最后一块，再标记结束。
 
     _chunkTimer?.cancel();
     _chunkTimer = null;
 
     await _recorder.stop();
 
-    // 读取并上传最后一块
+    // 读取并上传最后一块（_isRecording 仍为 true，guard 放行）
     await _flushChunk();
+
+    // 标记真正结束（在最后一块已 flush 之后）
+    _isRecording = false;
 
     await _pcmSink?.flush();
     await _pcmSink?.close();

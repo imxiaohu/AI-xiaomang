@@ -28,6 +28,18 @@ class SseStreamService {
 
   bool _disposed = false;
 
+  // Last-Event-ID 续传：记录最近一次成功收到的事件 ID
+  // 重连时通过 query string 传给后端，从该位置之后开始重放
+  int? _lastEventId;
+
+  /// 暴露当前 lastEventId（用于诊断 / 强制重置时清零）
+  int? get lastEventId => _lastEventId;
+
+  /// 重置 lastEventId（用于 App 重启 / 主动放弃续传场景）
+  void resetLastEventId() {
+    _lastEventId = null;
+  }
+
   // 回调
   SseTextCallback? onText;
   SseAudioCallback? onAudio;
@@ -41,7 +53,7 @@ class SseStreamService {
   VoidCallback? onOmniSpeechStarted;
   VoidCallback? onOmniSpeechStopped;
   VoidCallback? onOmniCommitted;
-  SseAudioCallback? onOmniAudio; // Omni PCM 24kHz stereo
+  SseAudioCallback? onOmniAudio; // Omni PCM 24kHz mono
 
   SseStreamService({
     required this.baseUrl,
@@ -50,6 +62,9 @@ class SseStreamService {
   });
 
   String _sseBuffer = '';
+  // SSE 事件分隔符：sse_starlette 默认发 \r\n\r\n，但有些代理/CDN 会规范化为 \n\n
+  // 这里两个都搜
+  static final RegExp _sseEventSep = RegExp(r'\r\n\r\n|\n\n');
 
   /// 连接SSE
   Future<void> connect() async {
@@ -57,8 +72,17 @@ class SseStreamService {
     _client?.close();
     _client = http.Client();
 
+    // 构造 query 参数：ctxId / token + 可选的 lastEventId 续传
+    final queryParams = <String, String>{
+      'ctxId': sessionId,
+      'token': token,
+    };
+    if (_lastEventId != null && _lastEventId! > 0) {
+      // 续传：从 _lastEventId 之后开始重放
+      queryParams['lastEventId'] = _lastEventId.toString();
+    }
     final uri = Uri.parse('$baseUrl/sse/chat').replace(
-      queryParameters: {'ctxId': sessionId, 'token': token},
+      queryParameters: queryParams,
     );
 
     try {
@@ -88,37 +112,52 @@ class SseStreamService {
     _lastDataTime = DateTime.now();
 
     _sseBuffer += raw;
+    // 关键修复：sse_starlette 默认发 \r\n 行尾（CRLF），事件间用 \r\n\r\n 分隔
+    // 原代码只搜 \n\n，匹配不到 → 事件被永远缓存，客户端看不到回复
     while (true) {
-      final eom = _sseBuffer.indexOf('\n\n');
-      if (eom == -1) {
-        // 可能还有不完整的行（以单个\n结尾），检查是否需要等待更多数据
-        if (_sseBuffer.contains('\n')) {
-          // 有不完整的行，但还没遇到空行，继续累积
-          break;
-        }
+      final match = _sseEventSep.firstMatch(_sseBuffer);
+      if (match == null) {
+        // 还没遇到事件结束分隔符（可能事件跨 chunk 到达），继续累积
         break;
       }
+      final eom = match.start;
       final eventText = _sseBuffer.substring(0, eom);
-      _sseBuffer = _sseBuffer.substring(eom + 2);
+      _sseBuffer = _sseBuffer.substring(match.end);
       _parseEvent(eventText);
     }
   }
 
   void _parseEvent(String eventText) {
-    // 解析单个SSE事件：event: type\ndata: payload\n\n
+    // 解析单个SSE事件：event: type\nid: <num>\ndata: payload\n\n
+    // 行尾可能是 \n 或 \r\n，统一 trim
+    // 注意：后端 EventBus 改造后，事件现在会带 id 字段
     String? eventType;
     String? eventData;
+    String? eventId;
 
     final lines = eventText.split('\n');
-    for (final line in lines) {
+    for (final rawLine in lines) {
+      // 去掉可能的 \r（CRLF 行尾）
+      final line = rawLine.endsWith('\r') ? rawLine.substring(0, rawLine.length - 1) : rawLine;
       if (line.startsWith('event:')) {
         eventType = line.substring(6).trim();
       } else if (line.startsWith('data:')) {
         eventData = line.substring(5).trim();
+      } else if (line.startsWith('id:')) {
+        // Last-Event-ID：用于断线重连续传
+        eventId = line.substring(3).trim();
       }
     }
 
     if (eventType == null || eventData == null) return;
+
+    // 记录最近事件 ID（用于重连时传给后端）
+    if (eventId != null) {
+      final parsed = int.tryParse(eventId);
+      if (parsed != null) {
+        _lastEventId = parsed;
+      }
+    }
 
     switch (eventType) {
       case 'text':
@@ -126,6 +165,7 @@ class SseStreamService {
         onText?.call(SseTextChunk(
           text: json['text'] as String? ?? '',
           isFinal: json['is_final'] as bool? ?? false,
+          source: json['source'] as String?,
         ));
         break;
       case 'audio':
@@ -133,13 +173,6 @@ class SseStreamService {
         onAudio?.call(SseAudioChunk(
           base64Audio: json['audio'] as String? ?? '',
           sampleIndex: json['index'] as int? ?? 0,
-        ));
-        break;
-      case 'end':
-        final json = jsonDecode(eventData) as Map<String, dynamic>;
-        onEnd?.call(SseEnd(
-          fullText: json['full_text'] as String?,
-          totalAudioChunks: json['total_chunks'] as int? ?? 0,
         ));
         break;
       case 'heartbeat':
@@ -180,7 +213,7 @@ class SseStreamService {
         final json = jsonDecode(eventData) as Map<String, dynamic>;
         onEnd?.call(SseEnd(
           fullText: json['full_text'] as String?,
-          totalAudioChunks: json['total_chunks'] as int? ?? 0,
+          totalAudioChunks: json['total_audio_chunks'] as int? ?? 0,
           audioSeconds: (json['audio_seconds'] as num?)?.toDouble() ?? 0.0,
         ));
         break;
@@ -285,6 +318,18 @@ class SseStreamService {
     } catch (_) {}
   }
 
+  /// 切换 Omni 交互模式
+  Future<void> setMode(String mode) async {
+    if (_disposed || _client == null) return;
+    try {
+      await _client!.post(
+        Uri.parse('$baseUrl/upload/mode'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'ctxId': sessionId, 'mode': mode}),
+      );
+    } catch (_) {}
+  }
+
   /// 断开连接
   void disconnect() {
     _disposed = true;
@@ -298,4 +343,3 @@ class SseStreamService {
 
   void dispose() => disconnect();
 }
-

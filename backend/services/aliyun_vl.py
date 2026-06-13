@@ -11,17 +11,34 @@ def _build_system_message(round_count: int = 0) -> dict:
     占位符 {round} 会被替换为当前对话轮次。
     """
     text = SYSTEM_PROMPT.replace("{round}", str(round_count))
-    return {
+    msg = {
         "role": "system",
         "content": [
             {
                 "type": "text",
                 "text": text,
-                # 显式缓存标记：系统提示词作为前缀缓存
-                "cache_control": {"type": "ephemeral"},
             }
         ],
     }
+    # #region agent log
+    # 假设 E：DashScope 兼容模式是否识别 OpenAI 风格的 cache_control
+    try:
+        import json as _json
+        import time as _time
+        with open("/Users/xiaohu/Downloads/AIVideo/.cursor/debug-b10e1d.log", "a", encoding="utf-8") as _f:
+            _f.write(_json.dumps({
+                "sessionId": "b10e1d",
+                "runId": "initial",
+                "hypothesisId": "E-cache-control",
+                "location": "aliyun_vl.py:_build_system_message",
+                "message": "system message has cache_control?",
+                "data": {"text_len": len(text), "has_cache_control_marker": False},
+                "timestamp": int(_time.time() * 1000),
+            }, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    # #endregion
+    return msg
 
 
 def _build_user_message(
@@ -171,6 +188,27 @@ class AliyunVL:
                 headers=self._headers(),
                 json=payload,
             ) as resp:
+                # #region agent log
+                try:
+                    import json as _json
+                    import time as _time
+                    with open("/Users/xiaohu/Downloads/AIVideo/.cursor/debug-b10e1d.log", "a", encoding="utf-8") as _f:
+                        _f.write(_json.dumps({
+                            "sessionId": "b10e1d",
+                            "runId": "initial",
+                            "hypothesisId": "E-cache-control",
+                            "location": "aliyun_vl.py:chat_stream:resp",
+                            "message": "vl chat_stream HTTP response",
+                            "data": {
+                                "status_code": resp.status_code,
+                                "model": self._model,
+                                "msg_count": len(messages),
+                            },
+                            "timestamp": int(_time.time() * 1000),
+                        }, ensure_ascii=False) + "\n")
+                except Exception:
+                    pass
+                # #endregion
                 resp.raise_for_status()
                 async for line in resp.aiter_lines():
                     if not line.strip() or not line.startswith("data:"):

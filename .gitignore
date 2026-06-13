@@ -50,9 +50,9 @@ app.*.map.json
 backend/.env
 
 # 模型文件（大体积，禁止提交）
-assets/*.tflite
-assets/*.gguf
-assets/*.bin
+assets/**/*.tflite
+assets/**/*.gguf
+assets/**/*.bin
 
 # 后端 Python 虚拟环境
 backend/__pycache__/
