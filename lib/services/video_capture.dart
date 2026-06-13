@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:ui' show Offset, Size, Rect;
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
@@ -114,6 +115,61 @@ class VideoCaptureService {
     await _controller!.initialize();
 
     if (wasCapturing) startCapture();
+  }
+
+  // 对焦状态
+  bool _autoFocus = true;
+  bool get autoFocus => _autoFocus;
+
+  /// 切换自动/手动对焦模式
+  /// - true:  连续自动对焦（默认启动时）
+  /// - false: 锁定自动对焦，等待手动点击指定对焦点
+  Future<void> setAutoFocus(bool enabled) async {
+    if (_controller == null || !_controller!.value.isInitialized) return;
+    _autoFocus = enabled;
+    try {
+      if (enabled) {
+        // 恢复连续自动对焦
+        await _controller!.setFocusMode(FocusMode.auto);
+      } else {
+        // 锁定自动对焦：用户点击屏幕后会再调用 setFocusPoint
+        await _controller!.setFocusMode(FocusMode.locked);
+      }
+    } catch (_) {
+      // 部分设备/前置摄像头不支持，忽略
+    }
+  }
+
+  /// 手动点击对焦：屏幕坐标 → 摄像头归一化坐标 [0, 1]
+  /// [screenPoint] 屏幕点击位置（逻辑像素）
+  /// [previewSize] 摄像头预览原始尺寸
+  /// [renderRect] 摄像头画面在屏幕上的实际显示矩形（含 BoxFit.cover 裁剪）
+  Future<void> setFocusPoint(
+    Offset screenPoint, {
+    required Size previewSize,
+    required Rect renderRect,
+  }) async {
+    if (_controller == null || !_controller!.value.isInitialized) return;
+    if (renderRect.isEmpty) return;
+
+    // 1) 屏幕坐标 → 预览显示区域内的相对坐标 [0, 1]
+    final double dx = (screenPoint.dx - renderRect.left) / renderRect.width;
+    final double dy = (screenPoint.dy - renderRect.top) / renderRect.height;
+    if (dx < 0 || dx > 1 || dy < 0 || dy > 1) return;
+
+    // 2) camera 插件内部已对 sensor 方向做过补偿：setFocusPoint 接受的
+    //    (dx, dy) 是相对预览视图的归一化坐标 [0, 1]，原点在左上角，
+    //    方向与屏幕一致。直接传点击位置归一化后的值即可。
+    final Offset point = Offset(dx, dy);
+    try {
+      await _controller!.setFocusPoint(point);
+      // 同步设置测光点（曝光跟对焦联动）
+      await _controller!.setExposurePoint(point);
+      // 触发一次自动对焦完成合焦（点按即对焦）
+      await _controller!.setFocusMode(FocusMode.auto);
+    } catch (_) {
+      // 某些设备/前置摄像头不支持，忽略
+    }
   }
 
   /// 闪光灯开关

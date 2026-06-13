@@ -4,14 +4,21 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from routers import sse_chat, upload, tripo_3d
+from routers import sse_chat, upload, tripo_3d, model_download
 from services.session_manager import session_manager
+from services import marketplace_db
+from config import MODELS_CACHE_DIR
+import os
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
-    # 启动：启动会话清理后台任务
+    # 启动：初始化 3D 形象市场数据库 & 启动会话清理后台任务
+    marketplace_db.init_db()
+    # 初始化离线模型缓存目录
+    os.makedirs(MODELS_CACHE_DIR, exist_ok=True)
+    print(f"[main] offline models cache dir: {MODELS_CACHE_DIR}")
     await session_manager.start()
     yield
     # 关闭：停止清理任务
@@ -41,6 +48,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.include_router(sse_chat.router)
 app.include_router(upload.router)
 app.include_router(tripo_3d.router)
+app.include_router(model_download.router)
 
 
 @app.get("/health")

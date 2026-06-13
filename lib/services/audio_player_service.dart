@@ -9,25 +9,33 @@ import 'package:path_provider/path_provider.dart';
 /// 接收 base64 MP3/PCM 分片，串行播放，暴露音量回调用于球体动画
 ///
 /// 实现要点：
-/// 1. Omni 模式每次 turn 收到一段连续的 PCM 24kHz mono S16LE 流（~16 个 chunk）。
-///    旧实现（audioplayers）每个 chunk 写一次临时文件 + AVPlayer.setSource，
-///    iOS 上小 chunk 切换开销大、出现卡顿。
-/// 2. 新实现（just_audio）：把同一 turn 内的所有 WAV/PCM 分片**拼接**成一个临时文件
-///    一次性 setFilePath 播放，整段音频顺滑；播放完或新 turn 到达时清空。
+/// 1. 用 just_audio 的 [AudioPlayer] 共享同一播放器实例。
+/// 2. 状态机驱动：监听 `playerStateStream`，`completed` 时自动 setFilePath 下一个。
+///    setFilePath().then(play) 串行化避免"play() called before prepare"竞态。
+/// 3. PCM 24kHz mono 分片累积到 ~200ms（9600 字节）再拼成 WAV 写入临时文件。
+/// 4. turn 结束时清理所有临时文件。
 class AudioPlayerService {
-  // WAV header size (RIFF/fmt/data subchunks)
   static const int _wavHeaderSize = 44;
-  // 触发"实际播放"的待播放字节数阈值（约 200ms @ 24kHz mono S16LE）
-  static const int _flushThresholdBytes = 24000 * 2 * 1 * 200 ~/ 1000; // = 9600
+  // PCM flush 阈值：~200ms @ 24kHz mono S16LE = 9600 bytes
+  static const int _flushThresholdBytes = 24000 * 2 * 1 * 200 ~/ 1000;
 
-  final List<({Uint8List bytes, String mimeType})> _queue = [];
-  Uint8List? _pendingPcm; // Omni 累积的纯 PCM 数据（去掉 WAV header）
-  int _pendingPcmBytes = 0;
-  bool _isPlaying = false;
   final AudioPlayer _player = AudioPlayer();
-  int _turnId = 0; // 每次 startNewTurn 自增，用于隔离旧 turn 的回调
+  int _turnId = 0;
+  bool _busy = false; // 串行锁：避免并发 setFilePath
 
-  // 音量回调（0.0~1.0）
+  // 待播放队列（文件路径）
+  final List<String> _pendingFiles = [];
+  // 临时文件路径 → 音量估计
+  final Map<String, double> _fileVolume = {};
+
+  // PCM 累积缓冲
+  Uint8List? _pendingPcm;
+  int _pendingPcmBytes = 0;
+
+  // 当前 turn 写入的临时文件
+  final List<File> _tempFiles = [];
+
+  // 音量回调
   double _currentVolume = 0.5;
   Function(double volume)? onVolumeChanged;
 
@@ -37,22 +45,33 @@ class AudioPlayerService {
   Function(String error)? onError;
 
   AudioPlayerService() {
+    // 状态机：completed → 续播下一段
     _player.playerStateStream.listen((state) {
       if (state.processingState == ProcessingState.completed) {
+        // 当前文件播完；续播下一段或通知完成
         _onPlayComplete();
+      } else if (state.processingState == ProcessingState.ready) {
+        if (_busy) {
+          _currentVolume = _fileVolume[_currentPath] ?? _currentVolume;
+          onVolumeChanged?.call(_currentVolume);
+          onPlaybackStart?.call();
+        }
       }
     });
   }
 
   double get currentVolume => _currentVolume;
+  String? _currentPath; // 当前正在播放的文件
 
-  /// 开始新 turn：丢弃上一 turn 未播放完的内容，重置累积缓冲
+  /// 开始新 turn：清空队列并停止
   void startNewTurn() {
     _turnId++;
-    _queue.clear();
+    _pendingFiles.clear();
+    _fileVolume.clear();
     _pendingPcm = null;
     _pendingPcmBytes = 0;
-    _isPlaying = false;
+    _busy = false;
+    _currentPath = null;
     _player.stop();
   }
 
@@ -60,19 +79,16 @@ class AudioPlayerService {
   void enqueue(String base64Audio) {
     try {
       final bytes = base64Decode(base64Audio);
-      _queue.add((bytes: Uint8List.fromList(bytes), mimeType: 'audio/mpeg'));
-      _scheduleFlush();
+      _enqueueBytes(Uint8List.fromList(bytes));
     } catch (e) {
       onError?.call('音频分片解码失败: $e');
     }
   }
 
   /// 接收一个 base64 编码的 PCM 24kHz mono 分片
-  /// Omni 模式专用：把多个 PCM 分片拼成一段 WAV 再一次性播放
   void enqueuePcm(String base64Pcm) {
     try {
       final pcmBytes = base64Decode(base64Pcm);
-      // Omni 总是 24kHz mono S16LE：每个样本 2 字节
       if (_pendingPcm == null) {
         _pendingPcm = Uint8List(0);
       }
@@ -81,83 +97,69 @@ class AudioPlayerService {
         ..setRange(_pendingPcmBytes, _pendingPcmBytes + pcmBytes.length, pcmBytes);
       _pendingPcm = merged;
       _pendingPcmBytes = merged.length;
-      _scheduleFlush();
+
+      if (_pendingPcmBytes >= _flushThresholdBytes) {
+        final pcm = _pendingPcm!;
+        _pendingPcm = null;
+        _pendingPcmBytes = 0;
+        _enqueueBytes(_pcmToWav(pcm));
+      }
     } catch (e) {
       onError?.call('PCM音频解码失败: $e');
     }
   }
 
-  /// 决定是否要把累积的内容真正送去播放器
-  /// 触发条件：
-  /// 1) MP3 队列里有 chunk 且当前没在播放（每个 MP3 chunk 独立播放）
-  /// 2) PCM 累积超过 ~200ms（拼成 WAV 一次播）
-  /// 3) endTurn 主动 flush（由调用方在收到 end 事件时调 flushPending）
-  void _scheduleFlush() {
-    if (_isPlaying) {
-      // 已经在播：让当前 turn 的内容留到播放完再播
-      return;
-    }
-    if (_queue.isNotEmpty) {
-      // MP3 分片：直接出队第一个播放
-      _playNextMp3();
-      return;
-    }
-    if (_pendingPcmBytes >= _flushThresholdBytes) {
-      _flushPcm();
-    }
+  /// 把一个已就绪的音频字节流写入临时文件并入队
+  void _enqueueBytes(Uint8List bytes) {
+    debugPrint('[AudioPlayer] _enqueueBytes bytes=${bytes.length} turn=$_turnId');
+    final name = 'audio_${_turnId}_${DateTime.now().microsecondsSinceEpoch}.bin';
+    _writeTempFile(bytes, name).then((file) {
+      debugPrint('[AudioPlayer] _writeTempFile OK path=${file.path}');
+      _tempFiles.add(file);
+      final path = file.path;
+      _fileVolume[path] = _estimateVolume(bytes);
+      _pendingFiles.add(path);
+      _drainQueue();
+    }, onError: (e) {
+      debugPrint('[AudioPlayer] _writeTempFile FAILED: $e');
+      onError?.call('音频临时文件写入失败: $e');
+    });
   }
 
-  /// 把累积的 PCM 拼成 WAV 并播放
-  Future<void> _flushPcm() async {
-    if (_pendingPcm == null || _pendingPcmBytes == 0) return;
-    final pcm = _pendingPcm!;
-    _pendingPcm = null;
-    _pendingPcmBytes = 0;
-
-    final wav = _pcmToWav(pcm);
-    _isPlaying = true;
-    onPlaybackStart?.call();
-
-    _currentVolume = _estimateVolume(wav);
-    onVolumeChanged?.call(_currentVolume);
-
+  /// 从队列取下一个文件播放（串行）
+  Future<void> _drainQueue() async {
+    if (_busy) return; // 正在播；_onPlayComplete 会接着调
+    if (_pendingFiles.isEmpty) return;
+    final path = _pendingFiles.removeAt(0);
+    _busy = true;
+    _currentPath = path;
+    debugPrint('[AudioPlayer] _drainQueue start path=$path pending=${_pendingFiles.length}');
     try {
-      // 写到临时文件（带 .wav 扩展名，让 iOS AVPlayer 识别格式）
-      final file = await _writeTempFile(wav, 'omni_$_turnId.wav');
-      await _player.setFilePath(file.path);
+      // 先 stop 旧 source，避免残留状态干扰
+      await _player.stop();
+      // 顺序：setFilePath → 等待完成 → play
+      await _player.setFilePath(path);
+      debugPrint('[AudioPlayer] setFilePath done, calling play');
       await _player.play();
+      debugPrint('[AudioPlayer] play OK');
     } catch (e) {
+      debugPrint('[AudioPlayer] _drainQueue ERROR: $e');
       onError?.call('音频播放失败: $e');
-      _isPlaying = false;
-      _scheduleFlush();
-    }
-  }
-
-  Future<void> _playNextMp3() async {
-    if (_queue.isEmpty) return;
-    final item = _queue.removeAt(0);
-    _isPlaying = true;
-    onPlaybackStart?.call();
-
-    _currentVolume = _estimateVolume(item.bytes);
-    onVolumeChanged?.call(_currentVolume);
-
-    try {
-      final file = await _writeTempFile(item.bytes, 'mp3_$_turnId.mp3');
-      await _player.setFilePath(file.path);
-      await _player.play();
-    } catch (e) {
-      onError?.call('音频播放失败: $e');
-      _isPlaying = false;
-      _scheduleFlush();
+      _busy = false;
+      _currentPath = null;
+      _drainQueue();
     }
   }
 
   void _onPlayComplete() {
-    _isPlaying = false;
-    onPlaybackComplete?.call();
-    // 继续播放剩余内容
-    _scheduleFlush();
+    debugPrint('[AudioPlayer] _onPlayComplete pending=${_pendingFiles.length}');
+    _busy = false;
+    _currentPath = null;
+    if (_pendingFiles.isNotEmpty) {
+      _drainQueue();
+    } else {
+      onPlaybackComplete?.call();
+    }
   }
 
   /// PCM 24kHz mono S16LE → WAV (RIFF header)
@@ -172,33 +174,32 @@ class AudioPlayerService {
 
     final wav = ByteData(_wavHeaderSize + dataSize);
     // RIFF header
-    wav.setUint8(0, 0x52); wav.setUint8(1, 0x49); // RIFF
+    wav.setUint8(0, 0x52); wav.setUint8(1, 0x49);
     wav.setUint8(2, 0x46); wav.setUint8(3, 0x46);
     wav.setUint32(4, fileSize, Endian.little);
-    wav.setUint8(8, 0x57); wav.setUint8(9, 0x41); // WAVE
+    wav.setUint8(8, 0x57); wav.setUint8(9, 0x41);
     wav.setUint8(10, 0x56); wav.setUint8(11, 0x45);
     // fmt subchunk
-    wav.setUint8(12, 0x66); wav.setUint8(13, 0x6D); // fmt
+    wav.setUint8(12, 0x66); wav.setUint8(13, 0x6D);
     wav.setUint8(14, 0x74); wav.setUint8(15, 0x20);
-    wav.setUint32(16, 16, Endian.little);           // subchunk1 size
-    wav.setUint16(20, 1, Endian.little);            // PCM format
+    wav.setUint32(16, 16, Endian.little);
+    wav.setUint16(20, 1, Endian.little);
     wav.setUint16(22, numChannels, Endian.little);
     wav.setUint32(24, sampleRate, Endian.little);
     wav.setUint32(28, byteRate, Endian.little);
     wav.setUint16(32, blockAlign, Endian.little);
     wav.setUint16(34, bitsPerSample, Endian.little);
     // data subchunk
-    wav.setUint8(36, 0x64); wav.setUint8(37, 0x61); // data
+    wav.setUint8(36, 0x64); wav.setUint8(37, 0x61);
     wav.setUint8(38, 0x74); wav.setUint8(39, 0x61);
     wav.setUint32(40, dataSize, Endian.little);
-    // PCM samples
     for (int i = 0; i < dataSize; i++) {
       wav.setUint8(44 + i, pcm[i]);
     }
     return wav.buffer.asUint8List();
   }
 
-  /// 估算音频分片音量（简单RMS）
+  /// 估算音频分片音量（简单 RMS）
   double _estimateVolume(Uint8List bytes) {
     if (bytes.length < 100) return 0.5;
     int sum = 0;
@@ -213,7 +214,7 @@ class AudioPlayerService {
     return count > 0 ? (sum / count / 32768.0).clamp(0.0, 1.0) : 0.5;
   }
 
-  /// 写入临时文件（带正确扩展名，iOS AVPlayer 必需）
+  /// 写入临时文件
   Future<File> _writeTempFile(Uint8List bytes, String name) async {
     final dir = await getTemporaryDirectory();
     final file = File('${dir.path}/$name');
@@ -221,34 +222,40 @@ class AudioPlayerService {
     return file;
   }
 
+  /// 清理当前 turn 的所有临时文件
+  void _cleanupTempFiles() {
+    for (final f in _tempFiles) {
+      f.delete().then((_) {}, onError: (_) {});
+    }
+    _tempFiles.clear();
+  }
+
   /// 强制把当前 turn 剩余的 PCM 拼出来播放（end 事件到达时调用）
   Future<void> flushPending() async {
-    if (_isPlaying) return;
     if (_pendingPcm != null && _pendingPcmBytes > 0) {
-      await _flushPcm();
+      final pcm = _pendingPcm!;
+      _pendingPcm = null;
+      _pendingPcmBytes = 0;
+      _enqueueBytes(_pcmToWav(pcm));
     }
   }
 
   /// 清空队列并停止
   void clear() {
-    _queue.clear();
+    _pendingFiles.clear();
+    _fileVolume.clear();
     _pendingPcm = null;
     _pendingPcmBytes = 0;
+    _busy = false;
+    _currentPath = null;
     _player.stop();
-    _isPlaying = false;
   }
 
-  /// 暂停
-  Future<void> pause() async {
-    await _player.pause();
-  }
-
-  /// 恢复
-  Future<void> resume() async {
-    await _player.play();
-  }
+  Future<void> pause() => _player.pause();
+  Future<void> resume() => _player.play();
 
   void dispose() {
+    _cleanupTempFiles();
     _player.dispose();
   }
 }

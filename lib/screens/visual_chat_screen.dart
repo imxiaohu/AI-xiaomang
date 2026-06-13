@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -21,13 +22,35 @@ class VisualChatScreen extends StatefulWidget {
 
 class _VisualChatScreenState extends State<VisualChatScreen>
     with WidgetsBindingObserver {
+  StreamSubscription<String>? _infoSub;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _initApp();
+      // 监听 AppState 的提示流（3D 生成成功等），在主屏弹 SnackBar
+      _infoSub = context.read<AppState>().infoMessages.listen(_onInfo);
     });
+  }
+
+  void _onInfo(String message) {
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(message),
+        action: SnackBarAction(
+          label: '管理',
+          onPressed: () {
+            Navigator.of(context).pushNamed('/settings');
+          },
+        ),
+        duration: const Duration(seconds: 4),
+      ),
+    );
   }
 
   void _initApp() async {
@@ -50,6 +73,7 @@ class _VisualChatScreenState extends State<VisualChatScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _infoSub?.cancel();
     super.dispose();
   }
 
@@ -78,8 +102,18 @@ class _VisualChatScreenState extends State<VisualChatScreen>
                   modelLoadProgress:
                       appState.modelLoaded ? -1 : appState.modelLoadProgress,
                   simulationMode: appState.simulationMode,
+                  isDownloading: appState.isDownloading,
+                  downloadProgress: appState.downloadProgress,
+                  downloadCurrentFile: appState.downloadCurrentFile,
+                  downloadError: appState.downloadError,
+                  autoFocus: appState.autoFocus,
                   onToggleFlash: appState.toggleFlash,
                   onSwitchCamera: appState.switchCamera,
+                  onToggleAutoFocus: appState.toggleAutoFocus,
+                  onOpenMarketplace: () =>
+                      Navigator.of(context).pushNamed('/marketplace'),
+                  onOpenSettings: () =>
+                      Navigator.of(context).pushNamed('/settings'),
                 ),
               ),
 
@@ -147,6 +181,7 @@ class _VisualChatScreenState extends State<VisualChatScreen>
                   messages: appState.messages,
                   expanded: appState.chatPanelExpanded,
                   runMode: appState.runMode,
+                  streamingText: appState.currentStreamingText,
                   onToggle: appState.toggleChatPanel,
                 ),
               ),
@@ -188,38 +223,127 @@ class _VisualChatScreenState extends State<VisualChatScreen>
       );
     }
 
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        // 摄像头画面（等比例裁剪填充）
-        FittedBox(
-          fit: BoxFit.cover,
-          child: SizedBox(
-            width: controller.value.previewSize?.height ?? 1,
-            height: controller.value.previewSize?.height ?? 1,
-            child: CameraPreview(controller),
-          ),
-        ),
-        // 底部黑边渐变
-        Positioned(
-          bottom: 0,
-          left: 0,
-          right: 0,
-          height: 60,
-          child: Container(
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-                colors: [
-                  Colors.transparent,
-                  Colors.black.withValues(alpha: 0.5),
-                ],
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // 计算摄像头画面在屏幕上的实际渲染矩形（BoxFit.cover 居中裁剪后）
+        final renderRect = _computeCameraRenderRect(
+          controller: controller,
+          boxConstraints: constraints,
+        );
+
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            // 摄像头画面（等比例裁剪填充）
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTapDown: (details) => _onCameraTap(
+                appState,
+                details.localPosition,
+                controller: controller,
+                renderRect: renderRect,
+              ),
+              child: FittedBox(
+                fit: BoxFit.cover,
+                child: SizedBox(
+                  width: controller.value.previewSize?.height ?? 1,
+                  height: controller.value.previewSize?.height ?? 1,
+                  child: CameraPreview(controller),
+                ),
               ),
             ),
-          ),
-        ),
-      ],
+
+            // 对焦指示器（点击位置显示的方框）
+            if (appState.focusPoint != null)
+              Positioned(
+                left: appState.focusPoint!.dx - 40,
+                top: appState.focusPoint!.dy - 40,
+                child: const _FocusIndicator(),
+              ),
+
+            // 对焦模式提示（屏幕中央底部，1.5s 自动消失）
+            Positioned(
+              bottom: 12,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: _FocusModeBadge(autoFocus: appState.autoFocus),
+              ),
+            ),
+
+            // 底部黑边渐变
+            Positioned(
+              bottom: 0,
+              left: 0,
+              right: 0,
+              height: 60,
+              child: Container(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Colors.transparent,
+                      Colors.black.withValues(alpha: 0.5),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  /// 计算 BoxFit.cover 模式下摄像头画面在屏幕上的实际渲染矩形
+  Rect _computeCameraRenderRect({
+    required CameraController controller,
+    required BoxConstraints boxConstraints,
+  }) {
+    final previewSize = controller.value.previewSize;
+    if (previewSize == null) {
+      return Offset.zero & boxConstraints.biggest;
+    }
+    // CameraPreview 内部是横向的，Flutter 插件会按 deviceOrientation 旋转
+    // 这里取 previewSize.height 作为显示的宽，与 CameraPreview 内的 SizedBox 一致
+    final srcW = previewSize.height;
+    final srcH = previewSize.width;
+    final dstW = boxConstraints.maxWidth;
+    final dstH = boxConstraints.maxHeight;
+    if (srcW == 0 || srcH == 0) return Offset.zero & boxConstraints.biggest;
+
+    // BoxFit.cover: 保持纵横比填满容器，超出部分裁剪
+    final srcRatio = srcW / srcH;
+    final dstRatio = dstW / dstH;
+    double renderW, renderH;
+    if (srcRatio > dstRatio) {
+      // 源更"宽"：以目标高度为基准，宽度超出
+      renderH = dstH;
+      renderW = dstH * srcRatio;
+    } else {
+      // 源更"高"：以目标宽度为基准，高度超出
+      renderW = dstW;
+      renderH = dstW / srcRatio;
+    }
+    final dx = (dstW - renderW) / 2;
+    final dy = (dstH - renderH) / 2;
+    return Rect.fromLTWH(dx, dy, renderW, renderH);
+  }
+
+  /// 处理摄像头预览区域内的点击：触发对焦
+  void _onCameraTap(
+    AppState appState,
+    Offset localPosition, {
+    required CameraController controller,
+    required Rect renderRect,
+  }) {
+    final previewSize = controller.value.previewSize;
+    if (previewSize == null) return;
+    appState.focusAt(
+      localPosition,
+      previewSize: previewSize,
+      renderRect: renderRect,
     );
   }
 
@@ -317,5 +441,85 @@ class _VisualChatScreenState extends State<VisualChatScreen>
     final tid = appState.tripoTaskId;
     if (tid == null) return null;
     return appState.activePreviewUrl;
+  }
+}
+
+/// 点击屏幕时显示的对焦方框（参考 iOS 原生相机）
+/// - 出现：从大缩小到正常尺寸（弹性动画）
+/// - 消失：先变细（黄色 → 浅绿）然后淡出
+class _FocusIndicator extends StatefulWidget {
+  const _FocusIndicator();
+
+  @override
+  State<_FocusIndicator> createState() => _FocusIndicatorState();
+}
+
+class _FocusIndicatorState extends State<_FocusIndicator>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 400),
+    )..forward();
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _ctrl,
+      builder: (context, _) {
+        // 0 → 0.6：1.6 → 1.0（缩小到正常）
+        // 0.6 → 1.0：保持 1.0
+        final t = _ctrl.value;
+        final scale = t < 0.6
+            ? 1.6 - (1.6 - 1.0) * (t / 0.6)
+            : 1.0;
+        return Transform.scale(
+          scale: scale,
+          child: Container(
+            width: 80,
+            height: 80,
+            decoration: BoxDecoration(
+              border: Border.all(
+                color: const Color(0xFFFFD60A), // iOS 风格黄色
+                width: 1.5,
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// 屏幕底部居中显示的对焦模式徽章
+/// 自动对焦时显示"自动对焦"，手动对焦时显示"点按对焦"
+class _FocusModeBadge extends StatelessWidget {
+  const _FocusModeBadge({required this.autoFocus});
+  final bool autoFocus;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.45),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Text(
+        autoFocus ? '自动对焦' : '点按屏幕指定对焦点',
+        style: const TextStyle(color: Colors.white, fontSize: 11),
+      ),
+    );
   }
 }

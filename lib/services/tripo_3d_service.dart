@@ -81,6 +81,7 @@ typedef TripoProgressCallback = void Function(TripoTaskStatus status, String? me
 /// 与后端 /tripo/* 路由通信，支持文生3D、单图生3D、多图生3D
 class TripoService {
   final String baseUrl;
+  final String token;
 
   http.Client? _client;
   Timer? _pollTimer;
@@ -98,77 +99,73 @@ class TripoService {
   /// 是否在生成中
   bool get isGenerating => _pollTimer != null && _activeTaskId != null;
 
-  TripoService({String? baseUrl})
-      : baseUrl = baseUrl ?? BackendConfig.baseUrl {
+  TripoService({String? baseUrl, String? token})
+      : baseUrl = baseUrl ?? BackendConfig.baseUrl,
+        token = token ?? BackendConfig.defaultToken {
     _client = http.Client();
   }
 
   String get _baseUri => baseUrl;
 
-  /// 文生3D
-  Future<String> textTo3D({
+  Map<String, dynamic> _extractData(http.Response resp) {
+    if (resp.statusCode != 200) {
+      throw Exception('Tripo API ${resp.statusCode}: ${resp.body}');
+    }
+    final data = jsonDecode(resp.body) as Map<String, dynamic>;
+    if (data['code'] != 0) {
+      throw Exception(data['message'] ?? 'Unknown error');
+    }
+    return data;
+  }
+
+  /// 文生3D（原始响应：返回 model_id 等所有字段，便于上层缓存关联）
+  Future<Map<String, dynamic>> textTo3DRaw({
     required String prompt,
     String model = 'Tripo/Tripo-P1.0',
     String textureQuality = 'standard',
   }) async {
     final resp = await _client!.post(
       Uri.parse('$_baseUri/tripo/text-to-3d'),
-      headers: {'Content-Type': 'application/json'},
+      headers: {
+        'Content-Type': 'application/json',
+        if (token.isNotEmpty) 'X-User-Token': token,
+      },
       body: jsonEncode({
         'prompt': prompt,
         'model': model,
         'texture_quality': textureQuality,
       }),
     );
-
-    if (resp.statusCode != 200) {
-      throw Exception('Failed to create Tripo task: ${resp.body}');
-    }
-
-    final data = jsonDecode(resp.body) as Map<String, dynamic>;
-    if (data['code'] != 0) {
-      throw Exception(data['message'] ?? 'Unknown error');
-    }
-
-    return data['task_id'] as String;
+    return _extractData(resp);
   }
 
-  /// 单图生3D
-  Future<String> imageTo3D({
+  /// 单图生3D（原始响应）
+  Future<Map<String, dynamic>> imageTo3DRaw({
     required String imageUrl,
     String model = 'Tripo/Tripo-P1.0',
     String textureQuality = 'standard',
   }) async {
     final resp = await _client!.post(
       Uri.parse('$_baseUri/tripo/image-to-3d'),
-      headers: {'Content-Type': 'application/json'},
+      headers: {
+        'Content-Type': 'application/json',
+        if (token.isNotEmpty) 'X-User-Token': token,
+      },
       body: jsonEncode({
         'image_url': imageUrl,
         'model': model,
         'texture_quality': textureQuality,
       }),
     );
-
-    if (resp.statusCode != 200) {
-      throw Exception('Failed to create Tripo task: ${resp.body}');
-    }
-
-    final data = jsonDecode(resp.body) as Map<String, dynamic>;
-    if (data['code'] != 0) {
-      throw Exception(data['message'] ?? 'Unknown error');
-    }
-
-    return data['task_id'] as String;
+    return _extractData(resp);
   }
 
-  /// 多图生3D
-  /// images: 固定4个元素 [前, 左, 后, 右]，不需要的传 null
-  Future<String> multiImageTo3D({
+  /// 多图生3D（原始响应）
+  Future<Map<String, dynamic>> multiImageTo3DRaw({
     required List<Map<String, String>?> images,
     String model = 'Tripo/Tripo-P1.0',
     String textureQuality = 'standard',
   }) async {
-    // 构建 images 列表，空视角传 null
     final imagesPayload = images.map((img) {
       if (img == null) return <String, dynamic>{};
       return {
@@ -179,23 +176,59 @@ class TripoService {
 
     final resp = await _client!.post(
       Uri.parse('$_baseUri/tripo/multi-image-to-3d'),
-      headers: {'Content-Type': 'application/json'},
+      headers: {
+        'Content-Type': 'application/json',
+        if (token.isNotEmpty) 'X-User-Token': token,
+      },
       body: jsonEncode({
         'images': imagesPayload,
         'model': model,
         'texture_quality': textureQuality,
       }),
     );
+    return _extractData(resp);
+  }
 
-    if (resp.statusCode != 200) {
-      throw Exception('Failed to create Tripo task: ${resp.body}');
-    }
+  /// 文生3D
+  Future<String> textTo3D({
+    required String prompt,
+    String model = 'Tripo/Tripo-P1.0',
+    String textureQuality = 'standard',
+  }) async {
+    final data = await textTo3DRaw(
+      prompt: prompt,
+      model: model,
+      textureQuality: textureQuality,
+    );
+    return data['task_id'] as String;
+  }
 
-    final data = jsonDecode(resp.body) as Map<String, dynamic>;
-    if (data['code'] != 0) {
-      throw Exception(data['message'] ?? 'Unknown error');
-    }
+  /// 单图生3D
+  Future<String> imageTo3D({
+    required String imageUrl,
+    String model = 'Tripo/Tripo-P1.0',
+    String textureQuality = 'standard',
+  }) async {
+    final data = await imageTo3DRaw(
+      imageUrl: imageUrl,
+      model: model,
+      textureQuality: textureQuality,
+    );
+    return data['task_id'] as String;
+  }
 
+  /// 多图生3D
+  /// images: 固定4个元素 [前, 左, 后, 右]，不需要的传 null
+  Future<String> multiImageTo3D({
+    required List<Map<String, String>?> images,
+    String model = 'Tripo/Tripo-P1.0',
+    String textureQuality = 'standard',
+  }) async {
+    final data = await multiImageTo3DRaw(
+      images: images,
+      model: model,
+      textureQuality: textureQuality,
+    );
     return data['task_id'] as String;
   }
 
@@ -203,6 +236,7 @@ class TripoService {
   Future<TripoStatusResponse> getStatus(String taskId) async {
     final resp = await _client!.get(
       Uri.parse('$_baseUri/tripo/status/$taskId'),
+      headers: {if (token.isNotEmpty) 'X-User-Token': token},
     );
 
     if (resp.statusCode == 503) {

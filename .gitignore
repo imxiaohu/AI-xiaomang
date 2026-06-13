@@ -53,11 +53,33 @@ backend/.env
 assets/**/*.tflite
 assets/**/*.gguf
 assets/**/*.bin
+assets/**/*.pb
+assets/**/*.pt
+assets/**/*.onnx
+# 整个 models/ 目录（含子文件）禁止提交
+# 注意：用 assets/models/* 而非 assets/models/，否则 .gitkeep 也会被父目录规则吃掉
+assets/models/*
+assets/models/**/*
+!assets/models/.gitkeep
+!assets/models/.gitkeep/
+# 后端 assets/models 目录同样禁止提交（大模型放这里供后端推理时加载）
+backend/assets/models/*
+backend/assets/models/**/*
+!backend/assets/models/.gitkeep
+!backend/assets/models/.gitkeep/
 
 # 后端 Python 虚拟环境
 backend/__pycache__/
 backend/.venv/
 backend/*.pyc
+
+# 后端运行时数据（SQLite 数据库等）
+backend/data/
+backend/data/**
+
+# 后端离线模型缓存（运行时下载的 vosk 等模型，大文件）
+backend/models_cache/
+backend/models_cache/**/*
 
 # Flutter iOS build
 /ios/Runner/Flutter/*.xcstate
@@ -73,6 +95,9 @@ agent-transcripts/
 # IDE终端状态文件
 terminal-*.json
 logs/
+
+# Cursor Agent mimocode 内部计划与缓存
+.mimocode/
 
 # IntelliJ module files
 ai_video.iml

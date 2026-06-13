@@ -1,95 +1,103 @@
 # 模型文件说明
 
-本目录包含 AI小芒 端侧离线推理所需的模型文件。
+本目录原本用于存放打包在 app bundle 中的 AI 端侧推理模型。
+**自 2026-06 起改为运行时下载**：模型不再随 app 安装包发布，而是在**首次启动时由 app 自动下载到设备的 `Documents/models/` 目录**。
 
-## 模型清单
+> 这个改动是为了绕过 iOS 平台的两个硬限制：
+> 1. `rootBundle.load()` 对大体积资产（≥ 几百 MB）会触发 `AssetManifest.json` 加载失败
+> 2. App Store / TestFlight 对安装包体积有严格上限（200MB / 4GB 警告线）
+>
+> 改为运行时下载后，app 本身只有几十 MB，模型走标准 HTTP 下载到本地磁盘。
 
-| 文件名 | 来源 | 大小 | 说明 |
-|--------|------|------|------|
-| `whisper-tiny-int8.tflite` | HuggingFace | ~31 MB | Whisper-tiny 语音识别模型（TFLite格式，int8量化） |
-| `Qwen-VL-2B-Q4_K_M.gguf` | ModelScope / HuggingFace | ~990 MB | Qwen2-VL-2B 视觉理解模型（GGUF格式，Q4_K_M量化） |
-| `ball.obj` | 本项目生成 | ~40 KB | 3D球体OBJ模型（用于flutter_3d_obj渲染） |
-
-## 模型下载
-
-运行根目录的下载脚本：
-
-```bash
-cd assets
-chmod +x download_models.sh
-./download_models.sh
-```
-
-### 下载源说明
-
-| 模型 | 推荐下载源 | 原因 |
-|------|-----------|------|
-| Whisper TFLite | HuggingFace | ModelScope 无官方 TFLite 镜像 |
-| Qwen-VL GGUF | ModelScope（国内） | HuggingFace 在国内速度较慢 |
-
-### 环境变量（可选）
-
-```bash
-# HuggingFace（用于私有模型或加速）
-export HF_TOKEN_COOKIE='从浏览器复制的完整Cookie'
-
-# ModelScope（用于私有模型或加速）
-export MS_TOKEN='your_modelscope_token'
-```
-
-## 放置位置
-
-下载后将模型文件放入 `assets/` 目录即可：
+## 1. 目录结构
 
 ```
 AIVideo/
 └── assets/
-    ├── whisper-tiny-int8.tflite   # 必须
-    ├── Qwen-VL-2B-Q4_K_M.gguf       # 必须
-    └── ball.obj                     # 可选（flutter_3d_obj 渲染3D球体用）
+    ├── ball.obj                # 3D 球体模型（打包进 app bundle，小于 1MB）
+    ├── ball.mtl
+    ├── README.md               # 本文件
+    └── download_models.sh      # 桌面端手动预下载脚本（可选）
 ```
 
-## 模型加载路径
+> ⚠️ `assets/models/` 目录已不再需要；即便创建了也不会被打包进 iOS/Android 安装包。
+> `.gitignore` 中 `assets/models/*` 仍然保留，防止开发者误将模型提交到仓库。
 
-模型在 Flutter 端按以下顺序查找：
+## 2. 模型清单
 
-1. 应用私有目录（优先）：`getApplicationDocumentsDirectory()/models/`
-2. assets 目录（fallback）：`assets/`
+| 模型                                    | 用途                       | 大小       | 运行时存放位置                                              |
+| --------------------------------------- | -------------------------- | ---------- | ----------------------------------------------------------- |
+| `vosk-model-small-cn-0.22.zip`          | 中文 ASR（Vosk）           | ~40 MB     | `<AppDocs>/models/vosk-model-small-cn-0.22/`（解压后）      |
+| `Qwen2-VL-2B-Instruct-Q4_K_M.gguf`      | 视觉理解（Qwen2-VL）       | ~990 MB    | `<AppDocs>/models/Qwen2-VL-2B-Instruct-Q4_K_M.gguf`          |
+| `mmproj-Qwen2-VL-2B-Instruct-f16.gguf`  | 视觉投影器（mmproj）       | ~1.3 GB    | `<AppDocs>/models/mmproj-Qwen2-VL-2B-Instruct-f16.gguf`     |
 
-建议首次运行时自动从 assets 复制到私有目录，参考 `offline_ai_engine.dart` 中的 `_getModelPath()` 方法。
+`<AppDocs>` 的具体路径：
+- iOS: `<App沙盒>/Documents/`（`getApplicationDocumentsDirectory()`）
+- Android: `/data/data/<package>/app_flutter/`（同上 API）
+- macOS / 桌面端调试: `~/Documents/AIVideo/models/`
 
-## 校验方式
+## 3. 首次启动自动下载流程
 
-下载后可用以下命令确认文件完整（非 HTML 错误页）：
+```
+[App 启动]
+    ↓
+AppState.init()
+    ↓
+OfflineAIEngine.init()
+    ↓
+checkMissingModels() ──→ 如有缺失，UI 顶部出现绿色下载进度条
+    ↓                      状态：Vosk 中文模型 30% / Qwen2-VL 65% / mmproj 100%
+    ↓
+downloadIfMissing()  (三段式：vosk 30% → vl 35% → mmproj 35%)
+    ↓
+onDownloadProgress(0.0~1.0, currentFile) 回调
+    ↓
+onDownloadComplete(true) 触发
+    ↓
+_loadVosk() + _loadVL()  (从磁盘加载到 native 引擎)
+    ↓
+asrAvailable=true / vlAvailable=true → 离线模式就绪
+```
+
+- 下载源：Vosk 走 alphacephei.com；Qwen2-VL / mmproj 走 ModelScope + HuggingFace 备份源
+- 进度可视化：状态栏绿色 banner 实时显示 `下载中 35%`
+- 失败重试：状态栏红色条点击重试，无需重启 app
+- 幂等：每次启动只检查文件存在性，已存在会跳过
+
+## 4. 桌面端手动预下载（开发/调试用）
+
+如果想在 PC 上预先下载好模型（便于调试或离线分发），运行：
 
 ```bash
-# 检查文件大小（tflite 应 > 10MB，gguf 应 > 500MB）
-ls -lh assets/*.tflite assets/*.gguf
-
-# 检查文件头（排除 HTML 错误页）
-head -c 20 assets/whisper-tiny-int8.tflite | xxd
-# 正常TFLite文件头应为: 0x000... 类型的二进制数据
-# 若看到 "3c21444f435459"（<!DOCT）则是 HTML 错误页
+cd assets
+bash download_models.sh
 ```
 
-## Whisper TFLite 模型说明
+脚本会把模型下载到 `./models/`（**仅供桌面参考**）。**移动端 app 不读这个目录**，
+只通过运行时 HTTP 拉取。
 
-- **模型**: [onnx-community/whisper-tiny-int8](https://huggingface.co/onnx-community/whisper-tiny-int8)
-- **格式**: TFLite FlatBuffer（`.tflite`）
-- **量化**: int8（体积小，适合移动端）
-- **输入**: Mel Spectrogram (80x3000 float32)
-- **输出**: 文本（需 CTC 解码）
+## 5. 下载源
 
-## Qwen-VL GGUF 模型说明
+- Vosk 中文: <https://alphacephei.com/vosk/models/vosk-model-small-cn-0.22.zip>
+- Qwen2-VL GGUF（主）: <https://www.modelscope.cn/models/bartowski/Qwen2-VL-2B-Instruct-GGUF/resolve/main/Qwen2-VL-2B-Instruct-Q4_K_M.gguf>
+- Qwen2-VL GGUF（备份）: <https://huggingface.co/bartowski/Qwen2-VL-2B-Instruct-GGUF/resolve/main/Qwen2-VL-2B-Instruct-Q4_K_M.gguf>
+- mmproj（主）: <https://www.modelscope.cn/models/bartowski/Qwen2-VL-2B-Instruct-GGUF/resolve/main/mmproj-Qwen2-VL-2B-Instruct-f16.gguf>
+- mmproj（备份）: <https://huggingface.co/bartowski/Qwen2-VL-2B-Instruct-GGUF/resolve/main/mmproj-Qwen2-VL-2B-Instruct-f16.gguf>
 
-- **模型**: [bartowski/Qwen2-VL-2B-Instruct-GGUF](https://huggingface.co/bartowski/Qwen2-VL-2B-Instruct-GGUF)
-- **量化**: Q4_K_M（4-bit量化，精度与体积平衡）
-- **格式**: GGUF（llama.cpp 原生格式）
-- **加载方式**: llama_cpp_dart
+## 6. 校验方式
 
-> 注意：Qwen-VL GGUF 文件约 1GB，首次加载可能需要 30-60 秒。
+```bash
+# iOS 沙盒
+APP_DOCS=$(xcrun simctl get_app_container booted org.xxx.AIVideo data)
+ls -lh "$APP_DOCS/Documents/models/"
 
-## 3D 球体 OBJ
+# 期望输出：
+# drwxr-xr-x  vosk-model-small-cn-0.22/        ~40 MB
+# -rw-r--r--  Qwen2-VL-2B-Instruct-Q4_K_M.gguf  ~990 MB
+# -rw-r--r--  mmproj-Qwen2-VL-2B-Instruct-f16.gguf  ~1.3 GB
+```
 
-- 如不使用真实 3D 渲染（推荐：当前模拟 2D 方案已足够），可跳过 `ball.obj`
-- 如需启用：在 `pubspec.yaml` 中添加 `flutter_3d_obj` 依赖
+## 7. 推理后端
+
+- ASR: `vosk_flutter_service ^0.1.1`（社区维护的 vosk_flutter 活跃分支，iOS 兼容）
+- VL:  `llama_cpp_dart ^0.2.2`（GGUF 加载 + ChatML 提示词格式）

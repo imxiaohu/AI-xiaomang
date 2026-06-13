@@ -10,6 +10,7 @@ class ChatPanel extends StatefulWidget {
   final List<ChatMessage> messages;
   final bool expanded;
   final AppRunMode runMode;
+  final String streamingText;
   final VoidCallback onToggle;
 
   const ChatPanel({
@@ -17,6 +18,7 @@ class ChatPanel extends StatefulWidget {
     required this.messages,
     required this.expanded,
     required this.runMode,
+    required this.streamingText,
     required this.onToggle,
   });
 
@@ -55,7 +57,8 @@ class _ChatPanelState extends State<ChatPanel>
       }
     }
     // 新消息时滚动到底部
-    if (widget.messages.length != oldWidget.messages.length) {
+    if (widget.messages.length != oldWidget.messages.length ||
+        widget.streamingText != oldWidget.streamingText) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (_scrollCtrl.hasClients) {
           _scrollCtrl.animateTo(
@@ -113,18 +116,26 @@ class _ChatPanelState extends State<ChatPanel>
                   children: [
                     // 拖拽条
                     _buildDragHandle(),
+                    // 折叠态：显示最新一条消息或实时流式文本
+                    if (!widget.expanded) _buildCollapsedHint(),
                     // 对话列表（展开时显示）
                     if (widget.expanded)
                       Expanded(
-                        child: widget.messages.isEmpty
+                        child: widget.messages.isEmpty && widget.streamingText.isEmpty
                             ? _buildEmptyHint()
                             : ListView.builder(
                                 controller: _scrollCtrl,
                                 padding:
                                     const EdgeInsets.symmetric(horizontal: 12),
-                                itemCount: widget.messages.length,
-                                itemBuilder: (ctx, i) =>
-                                    _buildMessageBubble(widget.messages[i]),
+                                itemCount: widget.messages.length +
+                                    (widget.streamingText.isEmpty ? 0 : 1),
+                                itemBuilder: (ctx, i) {
+                                  if (i < widget.messages.length) {
+                                    return _buildMessageBubble(widget.messages[i]);
+                                  }
+                                  // 末尾临时气泡（流式中）
+                                  return _buildStreamingBubble();
+                                },
                               ),
                       ),
                   ],
@@ -231,6 +242,131 @@ class _ChatPanelState extends State<ChatPanel>
               child: const Icon(Icons.auto_awesome, size: 14, color: Colors.white),
             ),
           ],
+        ],
+      ),
+    );
+  }
+
+  /// 折叠态顶部信息条：显示流式文本或最新一条已落库消息
+  Widget _buildCollapsedHint() {
+    final accentColor = widget.runMode == AppRunMode.offlineLocal
+        ? const Color(0xff28b987)
+        : const Color(0xff1976d2);
+
+    // 优先显示流式文本
+    String displayText = widget.streamingText;
+    if (displayText.isEmpty) {
+      // 回退到最新一条已落库消息
+      final last = widget.messages.isNotEmpty ? widget.messages.last : null;
+      if (last != null) {
+        displayText = (last.isUser ? '我：' : 'AI：') + last.text;
+      } else {
+        return const SizedBox.shrink();
+      }
+    } else {
+      displayText = 'AI：$displayText';
+    }
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      child: Row(
+        children: [
+          Container(
+            width: 6,
+            height: 6,
+            margin: const EdgeInsets.only(right: 6),
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: accentColor.withValues(alpha: 0.9),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              displayText,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.75),
+                fontSize: 12,
+                fontWeight: FontWeight.w400,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 临时流式气泡（在 messages 列表末尾，流式结束落库后消失）
+  Widget _buildStreamingBubble() {
+    final accentColor = widget.runMode == AppRunMode.offlineLocal
+        ? const Color(0xff28b987)
+        : const Color(0xff1976d2);
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.end,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          Flexible(
+            child: Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: accentColor.withValues(alpha: 0.25),
+                borderRadius: const BorderRadius.only(
+                  topLeft: Radius.circular(14),
+                  topRight: Radius.circular(14),
+                  bottomLeft: Radius.circular(14),
+                  bottomRight: Radius.circular(4),
+                ),
+                border: Border.all(
+                  color: accentColor.withValues(alpha: 0.3),
+                  width: 0.5,
+                ),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Flexible(
+                    child: Text(
+                      widget.streamingText,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 13,
+                        height: 1.4,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  // 打字机光标
+                  Container(
+                    width: 6,
+                    height: 12,
+                    margin: const EdgeInsets.only(bottom: 2),
+                    decoration: BoxDecoration(
+                      color: accentColor.withValues(alpha: 0.8),
+                      borderRadius: BorderRadius.circular(1),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(width: 6),
+          Container(
+            width: 28,
+            height: 28,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              gradient: LinearGradient(
+                colors: [accentColor, accentColor.withValues(alpha: 0.6)],
+              ),
+            ),
+            child: const Icon(Icons.auto_awesome, size: 14, color: Colors.white),
+          ),
         ],
       ),
     );

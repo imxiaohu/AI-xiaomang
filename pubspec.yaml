@@ -11,7 +11,7 @@ dependencies:
     sdk: flutter
 
   # 硬件权限
-  permission_handler: ^11.3.0
+  permission_handler: ^12.0.0
 
   # 音视频采集
   camera: ^0.11.0+2
@@ -52,6 +52,15 @@ dependencies:
   # 音频录制（16KHz PCM）
   record: ^6.2.1
 
+  # 离线语音识别（Vosk 中文 ASR）
+  # 选用 vosk_flutter_service（社区维护的 vosk_flutter 活跃分支），
+  # 原因：上游 vosk_flutter 0.3.x 在 iOS 平台直接抛 UnsupportedError，
+  #       本项目主要目标平台为 iOS，必须使用支持 iOS 的版本。
+  vosk_flutter_service: ^0.1.1
+
+  # 用户设置持久化（设置页 + 当前选中的市场模型 ID）
+  shared_preferences: ^2.2.3
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -60,4 +69,9 @@ dev_dependencies:
 flutter:
   uses-material-design: true
   assets:
-    - assets/
+    # 仅打包小型资产：3D 球体模型 + 模型说明文档
+    # 大模型（Vosk 中文、Qwen2-VL GGUF、mmproj）由 OfflineAIEngine 在首次启动时
+    # 运行时下载到应用文档目录，不进入 app bundle（避免 TestFlight / App Store 体积限制）
+    - assets/ball.obj
+    - assets/ball.mtl
+    - assets/README.md

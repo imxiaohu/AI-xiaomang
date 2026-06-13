@@ -1,41 +1,41 @@
 #!/bin/bash
-# AI小芒模型下载脚本
-# 支持 HuggingFace 和魔搭社区（ModelScope）两种下载源
+# AI小芒 模型下载脚本（开发/调试工具）
+#
+# 注意：自 2026-06 起，app 改为**运行时下载**到设备 Documents/models/ 目录。
+# 本脚本仅供桌面端调试、CI 预下载、或向 iOS 模拟器注入模型时使用。
+# 移动端 app 不读取 assets/models/，仅通过 HTTP 拉取。
+#
 # 用法: ./download_models.sh [hf|ms|auto]
 #   hf     - 强制使用 HuggingFace
 #   ms     - 强制使用魔搭社区
-#   auto   - 自动选择（默认）：Whisper TFLite 用 HF，Qwen-VL GGUF 用魔搭
+#   auto   - 自动选择（默认）：Vosk 走 alphacephei.com 一手，
+#                            Qwen-VL GGUF 走魔搭（国内快）
+#
 # 环境变量:
-#   HF_TOKEN  - HuggingFace Access Token（用于私有模型）
-#   MS_TOKEN  - 魔搭社区 Access Token（用于私有模型）
-#   PROXY     - 代理地址（默认: http://127.0.0.1:7897）
-#   HF_TOKEN_COOKIE - HF 的完整 Cookie（用于绕过 WAF）
-#                 获取方法: 浏览器登录 HF 后，在 DevTools -> Application -> Cookies 复制完整的 cookie 字符串
+#   HF_TOKEN         - HuggingFace Access Token
+#   MS_TOKEN         - 魔搭社区 Access Token
+#   HF_TOKEN_COOKIE  - HF 的完整 Cookie（绕过 WAF，更稳）
+#   PROXY            - 代理地址（默认 http://127.0.0.1:7897）
 set -e
 
 ASSETS_DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$ASSETS_DIR"
+MODELS_DIR="$ASSETS_DIR/models"
+mkdir -p "$MODELS_DIR"
+cd "$MODELS_DIR"
 
 echo "============================================"
 echo "AI小芒 模型下载脚本"
+echo "目标目录: $MODELS_DIR"
 echo "============================================"
 
 # ----------------------------------------------------------------
-# 代理配置（Clash 类代理默认端口 7890/7897）
+# 代理配置（Clash 默认端口 7890/7897）
 # ----------------------------------------------------------------
 PROXY="${PROXY:-http://127.0.0.1:7897}"
-PROXY_HOST="$(echo "$PROXY" | sed 's|http://||; s|https://||')"
 
-# 检测代理是否可用（通过 curl 代理 HEAD 请求）
 check_proxy() {
     curl -sI --max-time 5 -x "$PROXY" "https://huggingface.co/" 2>/dev/null | grep -q "HTTP" && return 0 || return 1
 }
-
-# 检测是否有 HF Token Cookie（比 Bearer Token 更有效绕过 WAF）
-HAS_COOKIE=false
-if [ -n "$HF_TOKEN_COOKIE" ]; then
-    HAS_COOKIE=true
-fi
 
 # ----------------------------------------------------------------
 # 解析下载源参数
@@ -48,13 +48,12 @@ case "$SOURCE" in
     *)    echo "[错误] 未知的下载源: $SOURCE"; exit 1 ;;
 esac
 
-# 自动选择策略: Whisper TFLite 用 HF，Qwen-VL GGUF 用魔搭
 resolve_source() {
     local model_name="$1"
     if [ "$USE_MS" = "auto" ]; then
         case "$model_name" in
-            whisper) echo "hf" ;;
-            qwen*)   echo "ms" ;;
+            vosk)    echo "vosk" ;;   # 官方一手
+            qwen*|mmproj*) echo "ms" ;; # 魔搭
             *)       echo "ms" ;;
         esac
     else
@@ -66,20 +65,13 @@ resolve_source() {
 # 环境变量检查
 # ----------------------------------------------------------------
 if [ -z "$HF_TOKEN" ] && [ -z "$HF_TOKEN_COOKIE" ]; then
-    echo "[提示] 未设置 HF_TOKEN 和 HF_TOKEN_COOKIE，将尝试匿名下载"
-    echo "[提示] 部分模型需要登录后才能下载"
-    echo "[提示] 推荐: export HF_TOKEN_COOKIE='从浏览器复制的完整 cookie'"
+    echo "[提示] 未设置 HF_TOKEN / HF_TOKEN_COOKIE，将尝试匿名下载"
 fi
-
 if [ -z "$MS_TOKEN" ]; then
-    echo "[提示] 未设置 MS_TOKEN 环境变量，将使用匿名下载"
+    echo "[提示] 未设置 MS_TOKEN，将使用匿名下载"
 fi
-
 echo ""
 
-# ----------------------------------------------------------------
-# 代理检测与提示
-# ----------------------------------------------------------------
 echo -n "[检测] 代理 $PROXY ... "
 if check_proxy; then
     echo "可用 ✓"
@@ -88,16 +80,12 @@ else
     echo "不可用，将尝试直连"
     PROXY_AVAILABLE=false
 fi
-
 echo ""
 
-# ----------------------------------------------------------------
-# 浏览器 UA（用于绕过 HF WAF）
-# ----------------------------------------------------------------
 BROWSER_UA="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
 
 # ----------------------------------------------------------------
-# 下载函数：wget 封装（支持重试、代理、Cookie）
+# 下载函数：wget 封装
 # ----------------------------------------------------------------
 download_with_retry() {
     local url="$1"
@@ -108,25 +96,17 @@ download_with_retry() {
     local retry=0
 
     while [ $retry -lt $max_retry ]; do
-        local wget_args=("-q" "--timeout=60" "-O" "$output")
-
-        # 代理（-x 设置代理，http_proxy 环境变量兜底）
+        local wget_args=("-q" "--timeout=120" "-O" "$output")
         if [ "$PROXY_AVAILABLE" = "true" ]; then
-            wget_args+=("-x" "$PROXY")
+            wget_args+=("-e" "use_proxy=on" "-x" "$PROXY")
         fi
-
-        # User-Agent
         wget_args+=("--header=User-Agent: $BROWSER_UA")
-
-        # Cookie（优先，比 Bearer Token 更有效绕过 WAF）
         if [ "$cookie" != "" ]; then
             wget_args+=("--header=Cookie: $cookie")
         elif [ "$token" != "" ]; then
             wget_args+=("--header=Authorization: Bearer $token")
         fi
-
         wget "${wget_args[@]}" "$url" && return 0
-
         retry=$((retry + 1))
         echo "  [重试] ($retry/$max_retry) $url"
         sleep 3
@@ -136,19 +116,7 @@ download_with_retry() {
 }
 
 # ----------------------------------------------------------------
-# 模型信息
-# ----------------------------------------------------------------
-
-# 1. Whisper-tiny-int8 TFLite
-WHISPER_FILE="whisper-tiny-transcribe-translate.tflite"
-WHISPER_SIZE_ESTIMATED="42MB"
-
-# 2. Qwen2-VL-2B-Instruct GGUF (Q4_K_M)
-VL_FILE="Qwen-VL-2B-Q4_K_M.gguf"
-VL_SIZE_ESTIMATED="0.99GB"
-
-# ----------------------------------------------------------------
-# 文件校验：确保下载的是二进制文件而非 HTML
+# 文件校验
 # ----------------------------------------------------------------
 validate_download() {
     local file="$1"
@@ -162,15 +130,14 @@ validate_download() {
         rm -f "$file"
         return 1
     fi
-    # 检查文件头魔数，排除 HTML/XML/JSON
     local magic=$(head -c 20 "$file" 2>/dev/null | xxd -p 2>/dev/null | head -c 40)
-    if echo "$magic" | grep -q "^3c21444f435459"; then  # "<!DOCT" HTML
+    if echo "$magic" | grep -q "^3c21444f435459"; then
         echo "  [错误] $expected_name 是 HTML 页面，未登录或被拦截"
         rm -f "$file"
         return 1
     fi
-    if echo "$magic" | grep -q "^7b22"; then  # "{\" JSON
-        echo "  [错误] $expected_name 是 JSON 响应（可能 API 错误）"
+    if echo "$magic" | grep -q "^7b22"; then
+        echo "  [错误] $expected_name 是 JSON 响应"
         rm -f "$file"
         return 1
     fi
@@ -178,108 +145,79 @@ validate_download() {
 }
 
 # ----------------------------------------------------------------
-# 下载 Whisper TFLite
+# 1) Vosk 中文小模型（多文件目录）
 # ----------------------------------------------------------------
-echo "[1/2] 下载 Whisper-tiny-transcribe-translate TFLite (${WHISPER_SIZE_ESTIMATED})..."
+VOSK_DIR="vosk-model-small-cn-0.22"
+VOSK_SIZE_ESTIMATED="40MB"
+VOSK_URL="https://alphacephei.com/vosk/models/${VOSK_DIR}.zip"
 
-if [ -f "$WHISPER_FILE" ] && [ -s "$WHISPER_FILE" ]; then
-    echo "  ✓ $WHISPER_FILE 已存在，跳过下载 ($(du -h $WHISPER_FILE | cut -f1))"
+echo "[1/3] 下载 Vosk 中文小模型 (${VOSK_SIZE_ESTIMATED})..."
+
+if [ -d "$VOSK_DIR" ] && [ -f "$VOSK_DIR/README" ]; then
+    echo "  ✓ $VOSK_DIR 已存在，跳过下载"
 else
-    WHISPER_SRC=$(resolve_source "whisper")
-
-    if [ "$WHISPER_SRC" = "hf" ] || [ "$WHISPER_SRC" = "ms" ]; then
-        # 优先 HF（Whisper TFLite 在魔搭无官方镜像）
-        # 正确地址: DocWolle/whisper_tflite_models（多语言，完整 transcribe+translate 功能）
-        # 已弃用: onnx-community/whisper-tiny-int8 不存在（404）
-        HF_URL="https://huggingface.co/DocWolle/whisper_tflite_models/resolve/main/whisper-tiny-transcribe-translate.tflite"
-        echo "  [下载] HF: $HF_URL"
-
-        if download_with_retry "$HF_URL" "$WHISPER_FILE" "$HF_TOKEN" "$HF_TOKEN_COOKIE"; then
-            if validate_download "$WHISPER_FILE" "Whisper TFLite"; then
-                echo "  ✓ 下载完成: $WHISPER_FILE ($(du -h $WHISPER_FILE | cut -f1))"
-            else
-                # Cookie/Token 方式失败，尝试模型scope（兜底）
-                echo "  [警告] HF 下载结果无效，尝试 ModelScope 兜底..."
-                rm -f "$WHISPER_FILE"
-                try_ms_whisper=false
-            fi
+    echo "  [下载] $VOSK_URL"
+    if download_with_retry "$VOSK_URL" "${VOSK_DIR}.zip"; then
+        echo "  [解压] ${VOSK_DIR}.zip"
+        if command -v unzip >/dev/null 2>&1; then
+            unzip -q "${VOSK_DIR}.zip"
+            rm -f "${VOSK_DIR}.zip"
+            echo "  ✓ 解压完成: $VOSK_DIR"
         else
-            echo "  [警告] HF 下载失败，尝试 ModelScope 兜底..."
-            try_ms_whisper=false
-        fi
-    fi
-
-    # 兜底：魔搭（虽然 openai-mirror/whisper-tiny 没有 tflite，但作为备用提示）
-    if [ ! -f "$WHISPER_FILE" ] || [ ! -s "$WHISPER_FILE" ]; then
-        echo "  [提示] Whisper TFLite 在魔搭无官方镜像"
-        echo "  [提示] 方案 A: 设置 HF_TOKEN_COOKIE 环境变量（从浏览器复制完整 Cookie）"
-        echo "  [提示] 方案 B: 手动下载: https://huggingface.co/DocWolle/whisper_tflite_models"
-        echo "  [提示] 方案 C: 使用 hf download: DocWolle/whisper_tflite_models --include whisper-tiny-transcribe-translate.tflite"
-
-        # 尝试用 Python + modelscope SDK 下载
-        echo "  [尝试] 通过 modelscope SDK 搜索替代模型..."
-        if python3 -c "
-from modelscope import snapshot_download
-snapshot_download('openai-mirror/whisper-tiny', allow_patterns='*.tflite', cache_dir='/tmp/ms_whisper_tflite', local_dir='.')
-" 2>/dev/null | grep -q "tflite"; then
-            echo "  ✓ 找到 tflite 文件"
-        fi
-
-        if [ ! -f "$WHISPER_FILE" ] || [ ! -s "$WHISPER_FILE" ]; then
-            echo "  [错误] Whisper TFLite 下载失败，请手动处理"
+            echo "  [错误] 未找到 unzip，请先安装 (brew install unzip) 后手动解压 ${VOSK_DIR}.zip"
             exit 1
         fi
+    else
+        echo "  [错误] Vosk 模型下载失败"
+        exit 1
     fi
 fi
 
 # ----------------------------------------------------------------
-# 下载 Qwen2-VL GGUF
+# 2) Qwen2-VL 主模型 GGUF
 # ----------------------------------------------------------------
+VL_FILE="Qwen2-VL-2B-Instruct-Q4_K_M.gguf"
+VL_SIZE_ESTIMATED="0.99GB"
+
 echo ""
-echo "[2/2] 下载 Qwen2-VL-2B-Instruct GGUF (Q4_K_M, ${VL_SIZE_ESTIMATED})..."
+echo "[2/3] 下载 Qwen2-VL-2B-Instruct GGUF (Q4_K_M, ${VL_SIZE_ESTIMATED})..."
 
 if [ -f "$VL_FILE" ] && [ -s "$VL_FILE" ]; then
-    echo "  ✓ $VL_FILE 已存在，跳过下载 ($(du -h $VL_FILE | cut -f1))"
+    echo "  ✓ $VL_FILE 已存在，跳过下载"
 else
     VL_SRC=$(resolve_source "qwen")
 
     if [ "$VL_SRC" = "ms" ]; then
-        # 魔搭社区（主力源）
-        MS_URL="https://www.modelscope.cn/models/bartowski/Qwen2-VL-2B-Instruct-GGUF/resolve/master/Qwen2-VL-2B-Instruct-Q4_K_M.gguf"
+        MS_URL="https://www.modelscope.cn/models/bartowski/Qwen2-VL-2B-Instruct-GGUF/resolve/master/${VL_FILE}"
         echo "  [下载] 魔搭: $MS_URL"
-
         if download_with_retry "$MS_URL" "$VL_FILE" "$MS_TOKEN" ""; then
             if validate_download "$VL_FILE" "Qwen-VL GGUF"; then
-                echo "  ✓ 下载完成: $VL_FILE ($(du -h $VL_FILE | cut -f1))"
+                echo "  ✓ 下载完成: $VL_FILE"
             fi
         fi
     fi
 
     # 兜底 1: AI-ModelScope 镜像
     if [ ! -f "$VL_FILE" ] || [ ! -s "$VL_FILE" ]; then
-        MS_URL_ALT="https://modelscope.cn/models/AI-ModelScope/Qwen2-VL-2B-Instruct-GGUF/resolve/master/Qwen2-VL-2B-Instruct-Q4_K_M.gguf"
-        echo "  [备用] 尝试 AI-ModelScope 镜像..."
+        MS_URL_ALT="https://modelscope.cn/models/AI-ModelScope/Qwen2-VL-2B-Instruct-GGUF/resolve/master/${VL_FILE}"
+        echo "  [备用] AI-ModelScope: $MS_URL_ALT"
         if download_with_retry "$MS_URL_ALT" "$VL_FILE" "$MS_TOKEN" ""; then
-            if validate_download "$VL_FILE" "Qwen-VL GGUF"; then
-                echo "  ✓ 下载完成: $VL_FILE ($(du -h $VL_FILE | cut -f1))"
-            fi
+            validate_download "$VL_FILE" "Qwen-VL GGUF" && echo "  ✓ 下载完成: $VL_FILE"
         fi
     fi
 
     # 兜底 2: HuggingFace
     if [ ! -f "$VL_FILE" ] || [ ! -s "$VL_FILE" ]; then
-        HF_URL="https://huggingface.co/bartowski/Qwen2-VL-2B-Instruct-GGUF/resolve/main/Qwen2-VL-2B-Instruct-Q4_K_M.gguf"
-        echo "  [备用] 尝试 HuggingFace: $HF_URL"
+        HF_URL="https://huggingface.co/bartowski/Qwen2-VL-2B-Instruct-GGUF/resolve/main/${VL_FILE}"
+        echo "  [备用] HuggingFace: $HF_URL"
         if download_with_retry "$HF_URL" "$VL_FILE" "$HF_TOKEN" "$HF_TOKEN_COOKIE"; then
-            if validate_download "$VL_FILE" "Qwen-VL GGUF"; then
-                echo "  ✓ 下载完成: $VL_FILE ($(du -h $VL_FILE | cut -f1))"
-            fi
+            validate_download "$VL_FILE" "Qwen-VL GGUF" && echo "  ✓ 下载完成: $VL_FILE"
         fi
     fi
 
     # 兜底 3: modelscope SDK
     if [ ! -f "$VL_FILE" ] || [ ! -s "$VL_FILE" ]; then
-        echo "  [备用] 尝试 modelscope SDK..."
+        echo "  [备用] modelscope SDK..."
         if python3 -c "
 from modelscope import snapshot_download
 snapshot_download('bartowski/Qwen2-VL-2B-Instruct-GGUF',
@@ -287,20 +225,54 @@ snapshot_download('bartowski/Qwen2-VL-2B-Instruct-GGUF',
     cache_dir='/tmp/ms_qwen_gguf',
     local_dir='.')
 " 2>/dev/null; then
-            # SDK 可能下载到缓存目录，需要找到文件
             found=$(find /tmp/ms_qwen_gguf -name "*Q4_K_M.gguf" 2>/dev/null | head -1)
             if [ -n "$found" ] && [ -s "$found" ]; then
                 cp "$found" "$VL_FILE"
-                echo "  ✓ 从缓存复制: $VL_FILE ($(du -h $VL_FILE | cut -f1))"
+                echo "  ✓ 从 SDK 缓存复制: $VL_FILE"
             fi
         fi
     fi
 
-    # 最终检查
     if [ ! -f "$VL_FILE" ] || [ ! -s "$VL_FILE" ]; then
         echo "  [错误] Qwen-VL GGUF 下载失败"
-        echo "  [提示] 模型约 1GB，下载慢可耐心等待"
         exit 1
+    fi
+fi
+
+# ----------------------------------------------------------------
+# 3) mmproj 视觉投影器（Qwen2-VL 多模态必需）
+# ----------------------------------------------------------------
+MMPROJ_FILE="mmproj-Qwen2-VL-2B-Instruct-f16.gguf"
+MMPROJ_SIZE_ESTIMATED="1.3GB"
+
+echo ""
+echo "[3/3] 下载 mmproj 视觉投影器 (${MMPROJ_SIZE_ESTIMATED})..."
+
+if [ -f "$MMPROJ_FILE" ] && [ -s "$MMPROJ_FILE" ]; then
+    echo "  ✓ $MMPROJ_FILE 已存在，跳过下载"
+else
+    MMPROJ_SRC=$(resolve_source "mmproj")
+
+    if [ "$MMPROJ_SRC" = "ms" ]; then
+        MS_URL="https://www.modelscope.cn/models/bartowski/Qwen2-VL-2B-Instruct-GGUF/resolve/master/${MMPROJ_FILE}"
+        echo "  [下载] 魔搭: $MS_URL"
+        if download_with_retry "$MS_URL" "$MMPROJ_FILE" "$MS_TOKEN" ""; then
+            validate_download "$MMPROJ_FILE" "mmproj GGUF" && echo "  ✓ 下载完成: $MMPROJ_FILE"
+        fi
+    fi
+
+    # 兜底: HuggingFace
+    if [ ! -f "$MMPROJ_FILE" ] || [ ! -s "$MMPROJ_FILE" ]; then
+        HF_URL="https://huggingface.co/bartowski/Qwen2-VL-2B-Instruct-GGUF/resolve/main/${MMPROJ_FILE}"
+        echo "  [备用] HuggingFace: $HF_URL"
+        if download_with_retry "$HF_URL" "$MMPROJ_FILE" "$HF_TOKEN" "$HF_TOKEN_COOKIE"; then
+            validate_download "$MMPROJ_FILE" "mmproj GGUF" && echo "  ✓ 下载完成: $MMPROJ_FILE"
+        fi
+    fi
+
+    if [ ! -f "$MMPROJ_FILE" ] || [ ! -s "$MMPROJ_FILE" ]; then
+        echo "  [错误] mmproj GGUF 下载失败"
+        echo "  [提示] 视觉理解功能将不可用（纯文本对话仍可工作）"
     fi
 fi
 
@@ -311,4 +283,7 @@ echo ""
 echo "============================================"
 echo "模型下载完成！"
 echo "============================================"
-ls -lh *.tflite *.gguf 2>/dev/null || true
+ls -lh models/*.gguf 2>/dev/null || ls -lh "$MODELS_DIR"/*.gguf 2>/dev/null || true
+echo ""
+echo "Vosk 模型目录:"
+ls -la "$VOSK_DIR" 2>/dev/null | head -10 || true

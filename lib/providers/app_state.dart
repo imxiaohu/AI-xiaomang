@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import '../models/enums.dart';
@@ -12,6 +13,8 @@ import '../services/connectivity_service.dart';
 import '../services/offline_ai_engine.dart';
 import '../services/background_audio_service.dart';
 import '../services/tripo_3d_service.dart';
+import '../services/marketplace_service.dart';
+import '../services/settings_service.dart';
 import '../utils/tts_service.dart';
 import '../config/env_config.dart';
 
@@ -20,8 +23,10 @@ import '../config/env_config.dart';
 class AppState extends ChangeNotifier {
   // ==============================
   // 运行模式
+  // 默认云端：connectCloud() 内置 max_reconnect 自动回退 offline
+  // 这样启动时如果后端可达 → 走云端；不可达 → 自动 fallback offline
   // ==============================
-  AppRunMode _runMode = AppRunMode.offlineLocal;
+  AppRunMode _runMode = AppRunMode.cloudAliyun;
   AppRunMode get runMode => _runMode;
 
   // ==============================
@@ -88,6 +93,10 @@ class AppState extends ChangeNotifier {
   String get currentStreamingText => _currentStreamingText;
   bool _userMessageSaved = false; // 当前轮次用户转录是否已保存
 
+  // 推理兜底计时器：thinking 超过 30s 自动 goIdle + 兜底消息
+  Timer? _inferenceTimeoutTimer;
+  static const int _inferenceTimeoutSeconds = 30;
+
   // ==============================
   // 录音
   // ==============================
@@ -112,10 +121,35 @@ class AppState extends ChangeNotifier {
   // ==============================
   double _modelLoadProgress = 0;
   bool _modelLoaded = false;
+  // 兼容字段：保留旧名，但语义改为"无任何本地模型可用"
   bool _simulationMode = false;
+  // 更细粒度的可用性：true 表示对应本地推理已就绪
+  bool _asrAvailable = false;
+  bool _vlAvailable = false;
+  // 模型下载状态（首次启动需要从 ModelScope/HF 下载到磁盘）
+  bool _isDownloading = false;
+  double _downloadProgress = 0;
+  String? _downloadCurrentFile; // 当前正在下载的模型名（给 UI 展示用）
+  String? _downloadError;
   double get modelLoadProgress => _modelLoadProgress;
   bool get modelLoaded => _modelLoaded;
   bool get simulationMode => _simulationMode;
+  bool get asrAvailable => _asrAvailable;
+  bool get vlAvailable => _vlAvailable;
+  bool get isDownloading => _isDownloading;
+  double get downloadProgress => _downloadProgress;
+  String? get downloadCurrentFile => _downloadCurrentFile;
+  String? get downloadError => _downloadError;
+
+  /// 离线模型根目录（供设置页展示）
+  String? get offlineModelsDir => _offlineEngine?.modelsDirPath;
+
+  /// 重新触发离线模型下载（设置页"重新下载"按钮）。
+  /// 内部复用 OfflineAIEngine 现有的 [downloadIfMissing] 流程。
+  Future<bool> retryOfflineDownload() async {
+    if (_offlineEngine == null) return false;
+    return _offlineEngine!.downloadIfMissing();
+  }
 
   // ==============================
   // 网络
@@ -134,6 +168,25 @@ class AppState extends ChangeNotifier {
   TtsService? _ttsService;
   OfflineAIEngine? _offlineEngine;
   BackgroundAudioService? _backgroundService;
+  MarketplaceService? _marketplaceService;
+
+  // ==============================
+  // 用户设置（持久化到 SharedPreferences）
+  // ==============================
+  AppSettings _settings = const AppSettings();
+  AppSettings get settings => _settings;
+  final SettingsService _settingsService = SettingsService();
+
+  /// 解析后的后端基础 URL：优先用设置中的值，空则用编译期默认值。
+  /// 所有需要后端 URL 的服务都应从这里取，而不是直接读 [BackendConfig.baseUrl]，
+  /// 这样设置页改了「后端地址」后能立刻生效。
+  String get backendBaseUrl =>
+      _settings.backendUrl.isNotEmpty ? _settings.backendUrl : BackendConfig.baseUrl;
+
+  /// 解析后的用户令牌（每次请求以 `X-User-Token` 头发送）
+  String get authToken => _settings.authToken.isNotEmpty
+      ? _settings.authToken
+      : BackendConfig.defaultToken;
 
   // ==============================
   // 互斥锁
@@ -173,10 +226,65 @@ class AppState extends ChangeNotifier {
   String? get tripoError => _tripoError;
 
   // ==============================
+  // 3D 形象市场
+  // ==============================
+  MarketplaceService get marketplace => _marketplaceService ??= MarketplaceService(
+        baseUrl: backendBaseUrl,
+        token: authToken,
+      );
+
+  // 当前正在用的市场模型（由设置页或市场页"选用"动作写入）。
+  // 与"刚生成完"的临时任务不同：这是用户主动选定的、跨重启保留的造型。
+  String? _activeMarketplaceModelId;
+  String? get activeMarketplaceModelId => _activeMarketplaceModelId;
+  // 当前选中的市场条目（懒加载）
+  MarketplaceItem? _activeMarketplaceItem;
+  MarketplaceItem? get activeMarketplaceItem => _activeMarketplaceItem;
+
+  // "我的模型" 列表（设置页中显示）
+  List<MarketplaceItem> _myModels = const [];
+  List<MarketplaceItem> get myModels => List.unmodifiable(_myModels);
+  bool _myModelsLoading = false;
+  bool get myModelsLoading => _myModelsLoading;
+  String? _myModelsError;
+  String? get myModelsError => _myModelsError;
+
+  // 市场分页缓存（MarketplaceScreen 使用）
+  List<MarketplaceItem> _marketplaceCache = const [];
+  List<MarketplaceItem> get marketplaceCache => List.unmodifiable(_marketplaceCache);
+  String _marketplaceQuery = '';
+  String get marketplaceQuery => _marketplaceQuery;
+  String _marketplaceType = 'all';
+  String get marketplaceType => _marketplaceType;
+  String _marketplaceSort = 'recent';
+  String get marketplaceSort => _marketplaceSort;
+  int _marketplacePage = 1;
+  int get marketplacePage => _marketplacePage;
+  int _marketplacePageSize = 24;
+  int get marketplacePageSize => _marketplacePageSize;
+  int _marketplaceTotal = 0;
+  int get marketplaceTotal => _marketplaceTotal;
+  bool _marketplaceLoading = false;
+  bool get marketplaceLoading => _marketplaceLoading;
+  String? _marketplaceError;
+  String? get marketplaceError => _marketplaceError;
+
+  // 一次性事件流：UI 监听以弹 SnackBar（例如 "已保存到形象市场"）
+  final StreamController<String> _infoMessages = StreamController<String>.broadcast();
+  Stream<String> get infoMessages => _infoMessages.stream;
+  void emitInfo(String msg) => _infoMessages.add(msg);
+
+  // ==============================
   // 初始化
   // ==============================
   bool _disposed = false;
   Future<void> init() async {
+    // 加载持久化的用户设置（在所有服务启动前，避免后端地址被覆盖）
+    _settings = await _settingsService.load();
+    _marketplacePageSize = _settings.marketplacePageSize;
+    _activeMarketplaceModelId = _settings.activeMarketplaceModelId;
+    notifyListeners();
+
     // 检测硬件
     _hardwareInfo = await HardwareInfo.detect();
     _degradationLevel = _hardwareInfo?.recommendedDegradation ?? AiDegradationLevel.reduced;
@@ -212,10 +320,11 @@ class AppState extends ChangeNotifier {
       debugPrint('[AppState] Background service error: $e');
     };
 
-    // 初始化离线AI引擎
-    _offlineEngine = OfflineAIEngine();
+    // 初始化离线AI引擎（不阻塞 init 流程，模型加载放后台）
+    // 模型下载源由后端 {baseUrl}/models/manifest 提供，而不是硬编码 ModelScope/HF URL
+    _offlineEngine = OfflineAIEngine(backendBaseUrl: backendBaseUrl);
     _offlineEngine!.onWhisperResult = (text) {
-      debugPrint('[AppState] Whisper result: $text');
+      debugPrint('[AppState] ASR result: $text');
     };
     _offlineEngine!.onVLResult = (text) {
       debugPrint('[AppState] VL result: $text');
@@ -227,15 +336,58 @@ class AppState extends ChangeNotifier {
       _modelLoadProgress = p;
       notifyListeners();
     };
-    await _offlineEngine!.init(_hardwareInfo);
-    _modelLoaded = _offlineEngine!.isWhisperReady;
-    _simulationMode = _offlineEngine!.isSimulationMode;
-    _modelLoadProgress = 1.0;
+    // 运行时模型下载进度（首次启动时）
+    _offlineEngine!.onDownloadProgress = (frac, currentFile) {
+      _isDownloading = true;
+      _downloadProgress = frac;
+      _downloadCurrentFile = currentFile;
+      notifyListeners();
+    };
+    _offlineEngine!.onDownloadComplete = (success, err) {
+      _isDownloading = false;
+      _downloadError = success ? null : err;
+      _downloadCurrentFile = null;
+      if (success) {
+        debugPrint('[AppState] Offline model download complete');
+      } else {
+        debugPrint('[AppState] Offline model download FAILED: $err');
+      }
+      notifyListeners();
+    };
+    // 关键：Vosk 加载约 1-2s、VL 加载 30-60s 都不应阻塞 init()
+    // 模型下载（首次启动约 30s-5min）更不阻塞。改用 unawaited 串行执行：
+    // 1) 检测缺失 → 2) 后台下载（带进度）→ 3) 下载完后初始化 native
+    _initOfflineEngineInBackground();
 
     // 初始化 Tripo 3D服务
     _initTripo();
 
+    // 默认云端模式：启动 SSE 连接
+    // max_reconnect 时 onError 自动 fallback 到 offlineLocal
+    if (_runMode == AppRunMode.cloudAliyun) {
+      _connectCloud();
+    }
+
     notifyListeners();
+  }
+
+  /// 后台加载离线引擎（不阻塞 init()）
+  Future<void> _initOfflineEngineInBackground() async {
+    try {
+      await _offlineEngine!.init(_hardwareInfo);
+      _asrAvailable = _offlineEngine!.isAsrAvailable;
+      _vlAvailable = _offlineEngine!.isVlAvailable;
+      _modelLoaded = _offlineEngine!.isWhisperReady;
+      _simulationMode = _offlineEngine!.isSimulationMode;
+      _modelLoadProgress = 1.0;
+      debugPrint('[AppState] Offline engine ready: asr=$_asrAvailable vl=$_vlAvailable simMode=$_simulationMode');
+      notifyListeners();
+    } catch (e) {
+      debugPrint('[AppState] Offline engine init error: $e');
+      _simulationMode = true;
+      _modelLoadProgress = 1.0;
+      notifyListeners();
+    }
   }
 
   Future<void> _initCamera() async {
@@ -285,9 +437,9 @@ class AppState extends ChangeNotifier {
       _sessionId = DateTime.now().millisecondsSinceEpoch.toString();
     }
     _sseService = SseStreamService(
-      baseUrl: BackendConfig.baseUrl,
+      baseUrl: backendBaseUrl,
       sessionId: _sessionId,
-      token: BackendConfig.defaultToken,
+      token: authToken,
     );
     _sseService!.onConnected = () {
       _connectionStatus = ConnectionStatus.connected;
@@ -298,6 +450,16 @@ class AppState extends ChangeNotifier {
       notifyListeners();
     };
     _sseService!.onError = (e) {
+      // 取消兜底计时器
+      _cancelInferenceTimeout();
+      // 任何 SSE 错误：立即脱离 thinking/speaking，避免永久死锁
+      if (_aiStatus == AiStatus.thinking || _aiStatus == AiStatus.speaking) {
+        addAiMessage('抱歉，连接出错了：${e.message}');
+        _aiStatus = AiStatus.idle;
+        _currentStreamingText = '';
+        _userMessageSaved = false;
+        notifyListeners();
+      }
       if (e.code == 'max_reconnect') {
         // 切换离线
         _runMode = AppRunMode.offlineLocal;
@@ -318,12 +480,21 @@ class AppState extends ChangeNotifier {
         }
         // 模型回复：追加式流式显示
         _currentStreamingText += chunk.text;
+        // 收到首条模型 token：把状态从 thinking 切到 speaking，
+        // 让球体动画 + 折叠态提示立刻有反应（不再死锁在 thinking）
+        if (_aiStatus == AiStatus.thinking) {
+          _aiStatus = AiStatus.speaking;
+          _resetIdleTimer();
+        }
+        // 重置兜底计时器（收到 token 说明推理活跃）
+        _resetInferenceTimeout();
       }
       notifyListeners();
       if (chunk.isFinal) {
         addAiMessage(_currentStreamingText);
         _currentStreamingText = '';
         _userMessageSaved = false;
+        _cancelInferenceTimeout();
         notifyListeners();
       }
     };
@@ -351,6 +522,8 @@ class AppState extends ChangeNotifier {
       // 服务端已提交音频缓冲，等待响应
     };
     _sseService!.onEnd = (end) {
+      // 取消兜底计时器：end 到了说明推理正常完成
+      _cancelInferenceTimeout();
       // 关键：end 事件到达时，把 Omni 累积的 PCM 立刻拼成 WAV 播放，
       // 避免 < 200ms 的尾段留到下次 turn 一起播（那会延迟 200ms+）
       _audioPlayer?.flushPending();
@@ -429,7 +602,7 @@ class AppState extends ChangeNotifier {
     // 现在改为懒初始化 —— 每次录音前确保实例存在。
     if (_audioRecorder == null) {
       _audioRecorder = AudioRecorderService(
-        baseUrl: BackendConfig.baseUrl,
+        baseUrl: backendBaseUrl,
         sessionId: _sessionId,
       );
       print('[AppState] _audioRecorder lazily constructed');
@@ -474,6 +647,8 @@ class AppState extends ChangeNotifier {
     await _audioRecorder?.stopRecording();
     _videoCapture?.stopCapture();
 
+    // 启动 30s 兜底：end 事件不来时强制 goIdle
+    _resetInferenceTimeout();
     _processInference();
   }
 
@@ -492,7 +667,7 @@ class AppState extends ChangeNotifier {
 
       if (_audioRecorder == null) {
         _audioRecorder = AudioRecorderService(
-          baseUrl: BackendConfig.baseUrl,
+          baseUrl: backendBaseUrl,
           sessionId: _sessionId,
         );
       }
@@ -513,6 +688,8 @@ class AppState extends ChangeNotifier {
       // 隔离上一 turn 残留的音频缓冲
       _audioPlayer?.startNewTurn();
       _sseService?.endTurn();
+      // 启动 30s 兜底
+      _resetInferenceTimeout();
     }
   }
 
@@ -525,15 +702,32 @@ class AppState extends ChangeNotifier {
       // 等待SSE推送（thinking状态保持）
       // 用户提问文本在SSE onText -> currentStreamingText -> addAiMessage 中处理
     } else {
-      // 离线推理：Whisper ASR + Qwen-VL 视觉理解 + 本地回答
+      // 离线推理：Vosk ASR + Qwen-VL 视觉理解 + 本地回答
       try {
-        // 第一步：从录音服务获取最新PCM数据，Whisper ASR识别
+        // 等待模型就绪（首次启动可能还在下载中）
+        if (_isDownloading) {
+          addAiMessage('模型下载中（${(_downloadProgress * 100).toStringAsFixed(0)}%），请稍候...');
+          return;
+        }
+        if (!_asrAvailable && !_vlAvailable) {
+          addAiMessage(_downloadError != null
+              ? '离线模型下载失败：$_downloadError'
+              : '离线模型不可用，请检查网络后重启');
+          goIdle();
+          return;
+        }
+
+        // 第一步：从录音服务获取最新PCM数据，Vosk ASR识别
+        // AudioRecorderService.getLatestPcmData() 已返回 Uint8List
         final pcmData = await _audioRecorder?.getLatestPcmData();
         String userText;
-        if (pcmData != null && pcmData.isNotEmpty) {
+        if (pcmData != null && pcmData.isNotEmpty && _asrAvailable) {
           userText = await _offlineEngine!.recognizeSpeech(pcmData);
         } else {
-          userText = '你好';
+          // ASR 不可用：使用占位文本（实际场景中可考虑降级到云端 ASR）
+          userText = pcmData != null && pcmData.isNotEmpty
+              ? '（离线ASR未加载，未识别语音）'
+              : '你好';
         }
 
         // 第二步：将用户提问存入消息列表（显示在ChatPanel）
@@ -541,7 +735,7 @@ class AppState extends ChangeNotifier {
 
         // 第三步：从视频捕获获取最新帧，Qwen-VL视觉推理
         String answer;
-        if (_offlineEngine?.isVLReady == true) {
+        if (_vlAvailable) {
           final frameBytes = _videoCapture?.getLatestFrame();
           if (frameBytes != null && frameBytes.isNotEmpty) {
             answer = await _offlineEngine!.understandImage(frameBytes, userText);
@@ -558,7 +752,7 @@ class AppState extends ChangeNotifier {
       } catch (e) {
         debugPrint('[AppState] Offline inference error: $e');
         if (_disposed) return;
-        addAiMessage('离线推理失败，请检查模型文件是否正确放置在assets目录');
+        addAiMessage('离线推理失败，请检查模型文件是否正确放置在 app 文档目录的 models/ 子目录');
         goIdle(); // 直接回idle，避免TTS不可用时卡在speaking状态
       }
     }
@@ -590,10 +784,39 @@ class AppState extends ChangeNotifier {
   void goIdle() {
     _aiStatus = AiStatus.idle;
     _recordingSeconds = 0;
+    _cancelInferenceTimeout();
     _resetIdleTimer();
     // 停止后台保活（idle状态节能）
     _backgroundService?.stop();
     notifyListeners();
+  }
+
+  /// 启动/重置 30s 推理兜底计时器：超时强制 goIdle + 落库兜底消息
+  void _resetInferenceTimeout() {
+    _inferenceTimeoutTimer?.cancel();
+    _inferenceTimeoutTimer = Timer(
+      const Duration(seconds: _inferenceTimeoutSeconds),
+      () {
+        debugPrint('[AppState] Inference timeout (${_inferenceTimeoutSeconds}s), force goIdle');
+        if (_aiStatus == AiStatus.thinking || _aiStatus == AiStatus.speaking) {
+          // 兜底：当前没有文本就给个空文本提示，有就保存当前流式
+          if (_currentStreamingText.isEmpty) {
+            addAiMessage('抱歉，没听清，请再说一次');
+          } else {
+            addAiMessage(_currentStreamingText);
+          }
+          _currentStreamingText = '';
+          _userMessageSaved = false;
+          _aiStatus = AiStatus.idle;
+          notifyListeners();
+        }
+      },
+    );
+  }
+
+  void _cancelInferenceTimeout() {
+    _inferenceTimeoutTimer?.cancel();
+    _inferenceTimeoutTimer = null;
   }
 
   void _resetIdleTimer() {
@@ -622,13 +845,13 @@ class AppState extends ChangeNotifier {
     notifyListeners();
     if (granted) {
       _audioRecorder = AudioRecorderService(
-        baseUrl: BackendConfig.baseUrl,
+        baseUrl: backendBaseUrl,
         sessionId: _sessionId,
       );
     }
     if (granted && _cameraPermissionGranted) {
       _videoCapture = VideoCaptureService(
-        baseUrl: BackendConfig.baseUrl,
+        baseUrl: backendBaseUrl,
         sessionId: _sessionId,
       );
       _videoCapture!.init(_cameras);
@@ -638,6 +861,45 @@ class AppState extends ChangeNotifier {
   // ==============================
   // 摄像头控制
   // ==============================
+  // 对焦模式：true=连续自动对焦, false=手动（等待用户点击屏幕）
+  bool _autoFocus = true;
+  bool get autoFocus => _autoFocus;
+  // 最近一次对焦的屏幕坐标（驱动 UI 显示对焦框），null=无
+  Offset? _focusPoint;
+  Offset? get focusPoint => _focusPoint;
+
+  Future<void> toggleAutoFocus() async {
+    _autoFocus = !_autoFocus;
+    notifyListeners();
+    await _videoCapture?.setAutoFocus(_autoFocus);
+  }
+
+  /// 用户点击屏幕触发对焦
+  /// [screenPoint] 屏幕逻辑像素坐标
+  /// [previewSize] 摄像头 sensor 原始尺寸
+  /// [renderRect] 摄像头画面在屏幕上的实际显示矩形
+  Future<void> focusAt(
+    Offset screenPoint, {
+    required Size previewSize,
+    required Rect renderRect,
+  }) async {
+    if (_aiStatus == AiStatus.listening) return;
+    _focusPoint = screenPoint;
+    notifyListeners();
+    await _videoCapture?.setFocusPoint(
+      screenPoint,
+      previewSize: previewSize,
+      renderRect: renderRect,
+    );
+    // 800ms 后清除对焦点（让 UI 上的对焦框淡出）
+    Future.delayed(const Duration(milliseconds: 800), () {
+      if (_focusPoint == screenPoint) {
+        _focusPoint = null;
+        notifyListeners();
+      }
+    });
+  }
+
   void toggleFlash() {
     if (_aiStatus == AiStatus.listening) return;
     _flashOn = !_flashOn;
@@ -648,6 +910,8 @@ class AppState extends ChangeNotifier {
   Future<void> switchCamera() async {
     if (_aiStatus == AiStatus.listening) return;
     await _videoCapture?.switchCamera(_cameras);
+    // 切换摄像头后同步对焦模式
+    await _videoCapture?.setAutoFocus(_autoFocus);
     notifyListeners();
   }
 
@@ -704,8 +968,11 @@ class AppState extends ChangeNotifier {
   // ==============================
   // Tripo 3D生成
   // ==============================
+  String? _tripoModelId; // 关联后端 market row id（生成成功后用于显示提示）
+  String? get tripoModelId => _tripoModelId;
+
   void _initTripo() {
-    _tripoService = TripoService(baseUrl: BackendConfig.baseUrl);
+    _tripoService = TripoService(baseUrl: backendBaseUrl);
     _tripoService!.onProgress = (status, _) {
       _tripoGenerating = true;
       switch (status) {
@@ -724,6 +991,10 @@ class AppState extends ChangeNotifier {
           _tripoModelUrl = _tripoService!.lastResult?.pbrModelUrl;
           _tripoPreviewUrl = _tripoService!.lastResult?.renderedImageUrl;
           _tripoError = null;
+          // 异步刷新"我的模型" + 提示用户
+          // ignore: discarded_futures
+          loadMyModels(refresh: false);
+          emitInfo('已保存到形象市场（${_visibilityZh(_settings.defaultModelVisibility)}）');
           break;
         case TripoTaskStatus.failed:
           _tripoStatusText = '生成失败，请重试';
@@ -749,6 +1020,22 @@ class AppState extends ChangeNotifier {
     };
   }
 
+  String _visibilityZh(String v) {
+    switch (v) {
+      case 'public':
+        return '公开';
+      case 'unlisted':
+        return '不公开';
+      case 'private':
+        return '私密';
+      default:
+        return v;
+    }
+  }
+
+  /// 从提交响应里提取 model_id（兼容老后端：没有 model_id 字段时返回 null）
+  String? _extractModelId(Map<String, dynamic> data) => data['model_id'] as String?;
+
   Future<void> startTextTo3D(String prompt) async {
     if (_tripoService == null) return;
     try {
@@ -756,11 +1043,19 @@ class AppState extends ChangeNotifier {
       _tripoStatusText = '正在提交生成任务…';
       _tripoProgress = 0.05;
       _tripoError = null;
+      _tripoModelId = null;
       notifyListeners();
 
-      final taskId = await _tripoService!.textTo3D(prompt: prompt);
-      _tripoTaskId = taskId;
-      _tripoService!.startPolling(taskId);
+      final data = await _tripoService!.textTo3DRaw(
+        prompt: prompt,
+        model: _settings.tripoModel,
+        textureQuality: _settings.tripoTextureQuality,
+      );
+      _tripoTaskId = data['task_id'] as String?;
+      _tripoModelId = _extractModelId(data);
+      if (_tripoTaskId != null) {
+        _tripoService!.startPolling(_tripoTaskId!);
+      }
     } catch (e) {
       _tripoGenerating = false;
       _tripoError = e.toString();
@@ -776,11 +1071,19 @@ class AppState extends ChangeNotifier {
       _tripoStatusText = '正在提交生成任务…';
       _tripoProgress = 0.05;
       _tripoError = null;
+      _tripoModelId = null;
       notifyListeners();
 
-      final taskId = await _tripoService!.imageTo3D(imageUrl: imageUrl);
-      _tripoTaskId = taskId;
-      _tripoService!.startPolling(taskId);
+      final data = await _tripoService!.imageTo3DRaw(
+        imageUrl: imageUrl,
+        model: _settings.tripoModel,
+        textureQuality: _settings.tripoTextureQuality,
+      );
+      _tripoTaskId = data['task_id'] as String?;
+      _tripoModelId = _extractModelId(data);
+      if (_tripoTaskId != null) {
+        _tripoService!.startPolling(_tripoTaskId!);
+      }
     } catch (e) {
       _tripoGenerating = false;
       _tripoError = e.toString();
@@ -796,6 +1099,7 @@ class AppState extends ChangeNotifier {
       _tripoStatusText = '正在提交生成任务…';
       _tripoProgress = 0.05;
       _tripoError = null;
+      _tripoModelId = null;
       notifyListeners();
 
       // encodedInput 格式: "url1|null|url3|null" (用|分隔，null=禁用/空)
@@ -813,9 +1117,16 @@ class AppState extends ChangeNotifier {
         images.add(null);
       }
 
-      final taskId = await _tripoService!.multiImageTo3D(images: images);
-      _tripoTaskId = taskId;
-      _tripoService!.startPolling(taskId);
+      final data = await _tripoService!.multiImageTo3DRaw(
+        images: images,
+        model: _settings.tripoModel,
+        textureQuality: _settings.tripoTextureQuality,
+      );
+      _tripoTaskId = data['task_id'] as String?;
+      _tripoModelId = _extractModelId(data);
+      if (_tripoTaskId != null) {
+        _tripoService!.startPolling(_tripoTaskId!);
+      }
     } catch (e) {
       _tripoGenerating = false;
       _tripoError = e.toString();
@@ -842,13 +1153,240 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ==============================
+  // 设置更新（应用后端地址 / 令牌 / 偏好变更）
+  // ==============================
+
+  /// 持久化新设置并在必要时重建后端服务。
+  ///
+  /// 当 [AppSettings.backendUrl] 或 [AppSettings.authToken] 变化时
+  /// 会断流旧连接并按新地址重新连接 SSE / 重建 Tripo / Recorder。
+  Future<void> updateSettings(AppSettings next) async {
+    final old = _settings;
+    _settings = next;
+    _marketplacePageSize = next.marketplacePageSize;
+    _activeMarketplaceModelId = next.activeMarketplaceModelId;
+    await _settingsService.save(next);
+    notifyListeners();
+
+    final backendChanged =
+        old.backendUrl != next.backendUrl || old.authToken != next.authToken;
+    if (backendChanged) {
+      _restartServicesWithNewBackend();
+    }
+  }
+
+  /// 重置为默认设置（保留设置页 UI 操作）
+  Future<void> resetSettings() async {
+    await _settingsService.reset();
+    final old = _settings;
+    _settings = const AppSettings();
+    _marketplacePageSize = _settings.marketplacePageSize;
+    _activeMarketplaceModelId = null;
+    notifyListeners();
+    if (old.backendUrl != _settings.backendUrl ||
+        old.authToken != _settings.authToken) {
+      _restartServicesWithNewBackend();
+    }
+  }
+
+  /// 断开 SSE / Tripo / Recorder，然后按当前设置重连。
+  /// 当前正在录音或正在 3D 生成时拒绝执行（保护进行中任务）。
+  void _restartServicesWithNewBackend() {
+    if (_aiStatus == AiStatus.listening) {
+      emitInfo('正在录音中，暂不切换后端，请稍后重试');
+      return;
+    }
+    if (_tripoGenerating) {
+      emitInfo('正在生成 3D 模型，暂不切换后端');
+      return;
+    }
+    _disconnectCloud();
+    _tripoService?.dispose();
+    _tripoService = null;
+    _audioRecorder?.dispose();
+    _audioRecorder = null;
+    _videoCapture?.dispose();
+    _videoCapture = null;
+    _marketplaceService?.dispose();
+    _marketplaceService = null;
+
+    // 重建
+    _initTripo();
+    if (_runMode == AppRunMode.cloudAliyun) {
+      _connectCloud();
+    }
+    notifyListeners();
+    emitInfo('已切换到新后端：${backendBaseUrl}');
+  }
+
+  /// 测试与当前后端地址的连接（用于设置页"测试连接"按钮）。
+  Future<bool> testBackendConnection({String? overrideUrl, String? overrideToken}) async {
+    final url = overrideUrl ?? backendBaseUrl;
+    final token = overrideToken ?? authToken;
+    try {
+      final client = HttpClient()..connectionTimeout = const Duration(seconds: 6);
+      try {
+        final req = await client.getUrl(Uri.parse('$url/health'));
+        if (token.isNotEmpty) {
+          req.headers.set('X-User-Token', token);
+        }
+        final resp = await req.close();
+        await resp.drain<void>();
+        return resp.statusCode == 200;
+      } finally {
+        client.close(force: true);
+      }
+    } catch (e) {
+      debugPrint('[AppState] test connection error: $e');
+      return false;
+    }
+  }
+
+  // ==============================
+  // 3D 形象市场（MarketplaceScreen / SettingsScreen 使用）
+  // ==============================
+
+  /// 设置市场筛选条件并触发重新加载（替换整个缓存）
+  Future<void> setMarketplaceFilters({
+    String? query,
+    String? type,
+    String? sort,
+  }) async {
+    if (query != null) _marketplaceQuery = query;
+    if (type != null) _marketplaceType = type;
+    if (sort != null) _marketplaceSort = sort;
+    _marketplacePage = 1;
+    notifyListeners();
+    await loadMarketplace();
+  }
+
+  /// 加载市场列表（追加或替换模式）
+  Future<void> loadMarketplace({bool refresh = true}) async {
+    if (refresh) {
+      _marketplacePage = 1;
+      _marketplaceCache = const [];
+    }
+    _marketplaceLoading = true;
+    _marketplaceError = null;
+    notifyListeners();
+    try {
+      final result = await marketplace.list(
+        q: _marketplaceQuery.isEmpty ? null : _marketplaceQuery,
+        type: _marketplaceType == 'all' ? null : _marketplaceType,
+        sort: _marketplaceSort,
+        page: _marketplacePage,
+        pageSize: _marketplacePageSize,
+      );
+      if (refresh || _marketplacePage == 1) {
+        _marketplaceCache = result.items;
+      } else {
+        _marketplaceCache = [..._marketplaceCache, ...result.items];
+      }
+      _marketplaceTotal = result.total;
+      _marketplacePage = result.page;
+    } catch (e) {
+      _marketplaceError = e.toString();
+    } finally {
+      _marketplaceLoading = false;
+      notifyListeners();
+    }
+  }
+
+  /// 加载下一页
+  Future<void> loadMarketplaceNextPage() async {
+    if (_marketplaceLoading) return;
+    final loaded = _marketplaceCache.length;
+    if (loaded >= _marketplaceTotal) return;
+    _marketplacePage += 1;
+    await loadMarketplace(refresh: false);
+  }
+
+  /// 重新加载当前用户拥有的模型列表（设置页"我的模型"用）
+  Future<void> loadMyModels({bool refresh = true}) async {
+    _myModelsLoading = true;
+    _myModelsError = null;
+    if (refresh) notifyListeners();
+    try {
+      final list = await marketplace.myModels();
+      _myModels = list;
+    } catch (e) {
+      _myModelsError = e.toString();
+    } finally {
+      _myModelsLoading = false;
+      notifyListeners();
+    }
+  }
+
+  /// 选用某个市场模型作为活动 3D 形象。
+  /// 会把对应 GLB / preview URL 同步给 TripoService，让旧的 [activeGlbUrl] /
+  /// [activePreviewUrl] getter 直接返回市场内容。
+  Future<void> setActiveMarketplaceModel(String modelId) async {
+    final item = await marketplace.download(modelId);
+    _activeMarketplaceModelId = modelId;
+    _activeMarketplaceItem = item;
+    _tripoTaskId = null; // 清掉临时生成任务指针，避免 activeGlbUrl 回退到旧任务
+    _tripoModelUrl = item.glbUrl;
+    _tripoPreviewUrl = item.previewUrl;
+    // 持久化
+    _settings = _settings.copyWith(activeMarketplaceModelId: modelId);
+    await _settingsService.save(_settings);
+    notifyListeners();
+  }
+
+  /// 清除活动市场模型（回到默认"未选用"状态）
+  Future<void> clearActiveMarketplaceModel() async {
+    _activeMarketplaceModelId = null;
+    _activeMarketplaceItem = null;
+    _settings = _settings.copyWith(activeMarketplaceModelId: null);
+    await _settingsService.save(_settings);
+    notifyListeners();
+  }
+
+  /// 调整某个模型的可见性（仅 owner；后端会做权限校验）
+  Future<MarketplaceItem> setModelVisibility(String modelId, String visibility) async {
+    final item = await marketplace.setVisibility(modelId, visibility);
+    if (_myModels.any((m) => m.id == modelId)) {
+      _myModels = _myModels.map((m) => m.id == modelId ? item : m).toList();
+    }
+    notifyListeners();
+    return item;
+  }
+
+  /// 修改模型元信息（title / tags）
+  Future<MarketplaceItem> updateModelMeta(
+    String modelId, {
+    String? title,
+    String? tags,
+  }) async {
+    final item = await marketplace.update(modelId, title: title, tags: tags);
+    if (_myModels.any((m) => m.id == modelId)) {
+      _myModels = _myModels.map((m) => m.id == modelId ? item : m).toList();
+    }
+    notifyListeners();
+    return item;
+  }
+
+  /// 删除一个市场模型（级联清本地文件）
+  Future<void> deleteModel(String modelId) async {
+    await marketplace.delete(modelId);
+    _myModels = _myModels.where((m) => m.id != modelId).toList();
+    if (_activeMarketplaceModelId == modelId) {
+      _activeMarketplaceModelId = null;
+      _activeMarketplaceItem = null;
+      _settings = _settings.copyWith(activeMarketplaceModelId: null);
+      await _settingsService.save(_settings);
+    }
+    notifyListeners();
+  }
+
   /// 获取当前活跃 GLB 的完整 URL（优先本地路径，后端下载完成后返回本地路径）
   String? get activeGlbUrl {
     final tid = _tripoTaskId;
     if (tid == null || _tripoService == null) return null;
     // lastResult.pbrModelUrl 来自后端 /status 接口，后端已做本地/远程降级
     return _tripoService!.lastResult?.pbrModelUrl ??
-        '${BackendConfig.baseUrl}/tripo/model/$tid/glb';
+        '$backendBaseUrl/tripo/model/$tid/glb';
   }
 
   /// 获取当前活跃预览图的完整 URL
@@ -879,6 +1417,7 @@ class AppState extends ChangeNotifier {
     _recordingTimer?.cancel();
     _modeSwitchUnlockTimer?.cancel();
     _idleTimer?.cancel();
+    _inferenceTimeoutTimer?.cancel();
     _sseService?.dispose();
     _audioRecorder?.dispose();
     _videoCapture?.dispose();
@@ -888,6 +1427,8 @@ class AppState extends ChangeNotifier {
     _offlineEngine?.dispose();
     _backgroundService?.dispose();
     _tripoService?.dispose();
+    _marketplaceService?.dispose();
+    _infoMessages.close();
     _cameraController?.dispose();
     super.dispose();
   }
