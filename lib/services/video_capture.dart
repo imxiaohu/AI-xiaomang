@@ -86,7 +86,11 @@ class VideoCaptureService {
     _captureTimer?.cancel();
     _captureTimer = null;
     try {
-      _controller?.stopImageStream();
+      if (_controller != null &&
+          _controller!.value.isInitialized &&
+          _controller!.value.isStreamingImages) {
+        _controller?.stopImageStream();
+      }
     } catch (_) {}
     _latestFrame = null;
   }
@@ -105,16 +109,21 @@ class VideoCaptureService {
       orElse: () => cameras.first,
     );
 
-    await _controller?.dispose();
+    try {
+      await _controller?.dispose();
+    } catch (_) {}
     _controller = CameraController(
       next,
       ResolutionPreset.low,
       enableAudio: false,
       imageFormatGroup: ImageFormatGroup.bgra8888,
     );
-    await _controller!.initialize();
-
-    if (wasCapturing) startCapture();
+    try {
+      await _controller!.initialize();
+      if (wasCapturing) startCapture();
+    } catch (e) {
+      onError?.call('摄像头切换失败: $e');
+    }
   }
 
   // 对焦状态

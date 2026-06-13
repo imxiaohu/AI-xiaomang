@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import '../models/sse_message.dart';
@@ -66,9 +67,49 @@ class SseStreamService {
   // 这里两个都搜
   static final RegExp _sseEventSep = RegExp(r'\r\n\r\n|\n\n');
 
+  // debug ingest (session deae74) — append NDJSON to local file
+  static const String _dbgPath = '/Users/xiaohu/Downloads/AIVideo/.cursor/debug-deae74.log';
+  static const String _dbgSession = 'deae74';
+  void _dbg(String location, String message, Map<String, dynamic> data, {String hypothesisId = 'H?'}) {
+    // #region agent log
+    try {
+      // ignore: avoid_print
+      print('[SseDbg] $location $message $data');
+      _appendNdjson({
+        'sessionId': _dbgSession,
+        'id': 'log_${DateTime.now().millisecondsSinceEpoch}_sse',
+        'timestamp': DateTime.now().millisecondsSinceEpoch,
+        'location': location,
+        'message': message,
+        'data': data,
+        'runId': 'pre-fix',
+        'hypothesisId': hypothesisId,
+      });
+    } catch (_) {}
+    // #endregion
+  }
+
+  void _appendNdjson(Map<String, dynamic> obj) {
+    // #region agent log
+    try {
+      // ignore: avoid_print
+      // 直接走 dart:io File 写一行
+      final f = File(_dbgPath);
+      f.parent.createSync(recursive: true);
+      f.writeAsStringSync('${jsonEncode(obj)}\n', mode: FileMode.append, flush: false);
+    } catch (_) {}
+    // #endregion
+  }
+
   /// 连接SSE
   Future<void> connect() async {
     if (_disposed) return;
+    // #region agent log
+    _dbg('sse_stream_service.dart:connect', 'connect_enter', {
+      'old_lastEventId': _lastEventId,
+      'old_client_alive': _client != null,
+    }, hypothesisId: 'H1');
+    // #endregion
     _client?.close();
     _client = http.Client();
 
@@ -97,12 +138,23 @@ class SseStreamService {
       _startHeartbeat();
       onConnected?.call();
 
+      // #region agent log
+      _dbg('sse_stream_service.dart:connect', 'subscription_about_to_listen', {
+        'lastEventId_sent': _lastEventId,
+        'uri_query': uri.query,
+      }, hypothesisId: 'H1');
+      // #endregion
       _subscription = stream.listen(
         (data) => _handleData(utf8.decode(data)),
         onError: _handleError,
         onDone: _handleDone,
       );
     } catch (e) {
+      // #region agent log
+      _dbg('sse_stream_service.dart:connect', 'connect_threw', {
+        'error': e.toString(),
+      }, hypothesisId: 'H1');
+      // #endregion
       _scheduleReconnect();
     }
   }
@@ -152,12 +204,21 @@ class SseStreamService {
     if (eventType == null || eventData == null) return;
 
     // 记录最近事件 ID（用于重连时传给后端）
+    int? parsedEid;
     if (eventId != null) {
-      final parsed = int.tryParse(eventId);
-      if (parsed != null) {
-        _lastEventId = parsed;
+      parsedEid = int.tryParse(eventId);
+      if (parsedEid != null) {
+        _lastEventId = parsedEid;
       }
     }
+
+    // #region agent log
+    _dbg('sse_stream_service.dart:_parseEvent', 'event_received', {
+      'eid': parsedEid,
+      'type': eventType,
+      'data_preview': eventData.length > 200 ? '${eventData.substring(0, 200)}…' : eventData,
+    }, hypothesisId: 'H2');
+    // #endregion
 
     switch (eventType) {
       case 'text':

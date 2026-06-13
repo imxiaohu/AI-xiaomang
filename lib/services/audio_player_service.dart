@@ -1,37 +1,43 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_soloud/flutter_soloud.dart';
 
-/// 音频播放器服务
-/// 接收 base64 PCM/MP3 分片，边收边播，0 间隙。
-///
-/// 关键设计（2026-06-14 第 5 次重写 — 切换到 flutter_soloud）：
-///
-/// 旧实现链：
-///  1. just_audio setFilePath：每次切换有 130-200ms prepare 间隙 → "一截一截"
-///  2. just_audio ConcatenatingAudioSource.add：AVQueuePlayer transition 风暴 → 卡死
-///  3. in-memory seek 续播：setFilePath + seek 在 iOS 上不可靠 → 重复说话
-///  4. 攒 1 个完整 WAV end 一次播：砍掉流式感
-///
-/// 新实现（flutter_soloud = SoLoud C++ 引擎，iOS 上跑在 AVAudioEngine 之上）：
-///  - 用 setBufferStream() 建一个 raw PCM streaming source
-///  - 每收到一份 PCM chunk → addAudioDataStream() 追加到同一个 stream
-///  - 整段 turn 期间只有 1 个 active audio source 在播放
-///  - SoLoud 内部用 ring buffer + AVAudioPlayerNode，**原生 gapless、无 prepare 间隙**
-///
-/// 延迟：setBufferStream 第一次拿够 bufferingTimeNeeds（~300ms）即开始播；
-///       之后 addAudioDataStream 是 O(1) append。
 class AudioPlayerService {
   static const int _sampleRate = 24000;
 
+  // debug ingest (session deae74) — append NDJSON to local file
+  static const String _dbgPath = '/Users/xiaohu/Downloads/AIVideo/.cursor/debug-deae74.log';
+  static const String _dbgSession = 'deae74';
+  void _dbg(String location, String message, Map<String, dynamic> data, {String hypothesisId = 'H?'}) {
+    // #region agent log
+    try {
+      // ignore: avoid_print
+      print('[AudioDbg] $location $message $data');
+      final obj = {
+        'sessionId': _dbgSession,
+        'id': 'log_${DateTime.now().millisecondsSinceEpoch}_audio',
+        'timestamp': DateTime.now().millisecondsSinceEpoch,
+        'location': location,
+        'message': message,
+        'data': data,
+        'runId': 'pre-fix',
+        'hypothesisId': hypothesisId,
+      };
+      final f = File(_dbgPath);
+      f.parent.createSync(recursive: true);
+      f.writeAsStringSync('${jsonEncode(obj)}\n', mode: FileMode.append, flush: false);
+    } catch (_) {}
+    // #endregion
+  }
+
   final SoLoud _soloud = SoLoud.instance;
-  AudioSource? _streamHandle; // 当前 turn 的 streaming source
-  SoundHandle? _activeHandle; // 当前正在播放的 handle
+  AudioSource? _streamHandle;
+  SoundHandle? _activeHandle;
   bool _playing = false;
   bool _ended = false;
 
-  // 音量（估算）
   double _currentVolume = 0.5;
   Function(double volume)? onVolumeChanged;
   VoidCallback? onPlaybackStart;
@@ -40,6 +46,10 @@ class AudioPlayerService {
 
   bool _initialized = false;
   Timer? _progressTimer;
+  int _chunkCount = 0;
+
+  // 缓冲：stream 未就绪时暂存 PCM 数据，startNewTurn 完成后 flush
+  final List<Uint8List> _pendingPcm = [];
 
   Future<void> _ensureInit() async {
     if (_initialized) return;
@@ -53,21 +63,32 @@ class AudioPlayerService {
     }
   }
 
+  /// 预初始化 SoLoud 引擎（SSE 连接时调用，避免首帧延迟）
+  Future<void> preInit() async {
+    await _ensureInit();
+  }
+
   double get currentVolume => _currentVolume;
 
-  /// 开始新 turn：建一个新的 streaming source
   Future<void> startNewTurn() async {
+    // #region agent log
+    _dbg('audio_player_service.dart:startNewTurn', 'startNewTurn_called', {
+      'chunkCount_was': _chunkCount,
+      'old_ended': _ended,
+      'streamHandle_was_alive': _streamHandle != null,
+    }, hypothesisId: 'H3');
+    // #endregion
     _ended = false;
     _playing = false;
     _chunkCount = 0;
+    _pendingPcm.clear();
     await _ensureInit();
-    // 停掉旧的（如果有）
     if (_streamHandle != null) {
       try {
         if (_activeHandle != null) {
-          await _soloud.stop(_activeHandle!);
+          _soloud.stop(_activeHandle!);
         }
-        await _soloud.disposeSource(_streamHandle!);
+        _soloud.disposeSource(_streamHandle!);
       } catch (_) {}
       _streamHandle = null;
       _activeHandle = null;
@@ -77,7 +98,7 @@ class AudioPlayerService {
       _streamHandle = _soloud.setBufferStream(
         maxBufferSizeBytes: 4 * 1024 * 1024,
         bufferingType: BufferingType.released,
-        bufferingTimeNeeds: 0.15,
+        bufferingTimeNeeds: 0.1,
         sampleRate: _sampleRate,
         channels: Channels.mono,
         format: BufferType.s16le,
@@ -88,14 +109,33 @@ class AudioPlayerService {
       onError?.call('创建音频流失败: $e');
       _streamHandle = null;
     }
+    // flush 暂存的 PCM
+    if (_streamHandle != null && _pendingPcm.isNotEmpty) {
+      for (final pcm in _pendingPcm) {
+        _appendPcm(pcm);
+      }
+      _pendingPcm.clear();
+    }
   }
 
-  /// chat/end 事件到达时调用：告诉 SoLoud 数据流已经结束
   Future<void> flushPending() async {
+    // #region agent log
+    _dbg('audio_player_service.dart:flushPending', 'flushPending_called', {
+      'chunkCount': _chunkCount,
+      'ended_before': _ended,
+      'streamHandle_alive': _streamHandle != null,
+    }, hypothesisId: 'H3');
+    // #endregion
     _ended = true;
     if (_streamHandle != null) {
       try {
         _soloud.setDataIsEnded(_streamHandle!);
+        // #region agent log
+        _dbg('audio_player_service.dart:flushPending', 'data_ended_signaled', {
+          'chunkCount': _chunkCount,
+          'ended_now': _ended,
+        }, hypothesisId: 'H3');
+        // #endregion
         _startProgressWatcher();
       } catch (e) {
         debugPrint('[AudioPlayer] setDataIsEnded ERROR: $e');
@@ -116,7 +156,6 @@ class AudioPlayerService {
       try {
         final consumed = _soloud.getStreamTimeConsumed(_streamHandle!);
         if (lastTime != null && consumed <= lastTime!) {
-          // 进度没增长 → 播完了
           stableCount++;
           if (stableCount >= 3) {
             t.cancel();
@@ -131,31 +170,30 @@ class AudioPlayerService {
         }
         lastTime = consumed;
       } catch (e) {
-        // stream 已经被 dispose，停止轮询
         t.cancel();
         _progressTimer = null;
       }
     });
   }
 
-  /// 接收一个 base64 编码的音频分片（VL+TTS 模式走 PCM 格式后）
   void enqueue(String base64Audio) {
-    // VL+TTS 模式已改为发送 PCM 24kHz mono S16LE，与 Omni 模式共用路径
     enqueuePcm(base64Audio);
   }
 
-  /// 接收一个 base64 编码的 PCM 24kHz mono S16LE 分片
+  /// 接收 base64 PCM 24kHz mono S16LE 分片
+  /// 如果 stream 未就绪，数据会暂存并在 startNewTurn 完成后 flush
   void enqueuePcm(String base64Pcm) {
     if (_ended) return;
-    if (_streamHandle == null) return;
     try {
       final pcm = base64Decode(base64Pcm);
+      if (_streamHandle == null) {
+        // stream 未就绪，暂存
+        _pendingPcm.add(pcm);
+        return;
+      }
       _appendPcm(pcm);
     } catch (_) {}
   }
-
-  // 音量更新节流
-  int _chunkCount = 0;
 
   void _appendPcm(Uint8List pcm) {
     if (pcm.isEmpty) return;
@@ -163,31 +201,61 @@ class AudioPlayerService {
 
     _chunkCount++;
 
+    // H8 修复：检测 Omni TTS 句间静默 padding 帧（全 0）。仍把数据喂给 SoLoud
+    // （保时序对齐），但不上报 volume，避免球体动画"哑火"。
+    final isSilentFrame = _isAllZero(pcm);
+
     try {
       _soloud.addAudioDataStream(_streamHandle!, pcm);
       if (!_playing) {
-        _activeHandle = _streamHandle!.handles.isNotEmpty
-            ? _streamHandle!.handles.first
-            : null;
-        _currentVolume = _estimateVolume(pcm);
-        onVolumeChanged?.call(_currentVolume);
-        _playing = true;
-        onPlaybackStart?.call();
-      } else if (_chunkCount % 10 == 0) {
-        _currentVolume = _estimateVolume(pcm);
-        onVolumeChanged?.call(_currentVolume);
+        // 关键修复（H4 变种）：stream.play() 后 handles 可能尚未填充
+        // ——若立即取 first 会拿到 null，下一帧的 _playing=true 标志
+        // 提前触发 onPlaybackStart，但音频其实没出来。延后一帧再确认。
+        if (_streamHandle!.handles.isNotEmpty) {
+          _activeHandle = _streamHandle!.handles.first;
+          // 静默帧：不更新 _currentVolume（避免上报 0.0 致 UI 哑火），
+          // 但仍触发 onPlaybackStart ——否则 UI 永远等不到"开始播放"事件
+          if (!isSilentFrame) {
+            _currentVolume = _estimateVolume(pcm);
+            onVolumeChanged?.call(_currentVolume);
+          }
+          _playing = true;
+          onPlaybackStart?.call();
+        }
+        // handles 还没就绪：保持 _playing=false，下一帧再判断
+      } else {
+        // H7 修复：_activeHandle 在首次 chunks 时可能仍为 null（handles 异步填充）。
+        // 后续 chunks 也必须检查并补抓 handles.first，否则 pause/resume/dispose
+        // 拿不到有效 handle → 暂停键失效 / 退出时 native 句柄泄露。
+        if (_activeHandle == null && _streamHandle!.handles.isNotEmpty) {
+          _activeHandle = _streamHandle!.handles.first;
+        }
+        // 静默 padding 帧：不打扰 UI；保持 _currentVolume 旧值
+        if (!isSilentFrame && _chunkCount % 10 == 0) {
+          _currentVolume = _estimateVolume(pcm);
+          onVolumeChanged?.call(_currentVolume);
+        }
       }
     } catch (e) {
-      debugPrint('[AudioPlayer] addAudioDataStream ERROR: $e');
+      // #region agent log
+      debugPrint('[AudioPlayer] addAudioDataStream ERROR: $e chunk=$_chunkCount');
+      // #endregion
     }
   }
 
-  /// 估算音频分片音量（简单 RMS，采样最多 4000 个样本 ≈ 83ms @24kHz）
+  /// 快速检测 PCM 帧是否全 0（采样前 64 字节，足够区分 TTS 句间 padding）
+  bool _isAllZero(Uint8List pcm) {
+    final n = pcm.length < 64 ? pcm.length : 64;
+    for (int i = 0; i < n; i++) {
+      if (pcm[i] != 0) return false;
+    }
+    return true;
+  }
+
   double _estimateVolume(Uint8List pcm) {
     if (pcm.length < 4) return 0.5;
     int sum = 0;
     int count = 0;
-    // 采样间隔：如果 chunk 很大，跳着采样以覆盖更多数据
     final step = pcm.length > 8000 ? 4 : 2;
     for (int i = 0; i < pcm.length - 1 && count < 4000; i += step) {
       final sample = pcm[i] | (pcm[i + 1] << 8);
@@ -195,7 +263,6 @@ class AudioPlayerService {
       sum += signed.abs();
       count++;
     }
-    // 平均绝对值 / 32768 → [0, 1]，再用 sqrt 压缩动态范围让小音量更明显
     final raw = count > 0 ? (sum / count / 32768.0) : 0.0;
     return raw.clamp(0.0, 1.0);
   }
@@ -204,6 +271,7 @@ class AudioPlayerService {
     _ended = false;
     _playing = false;
     _chunkCount = 0;
+    _pendingPcm.clear();
     _progressTimer?.cancel();
     _progressTimer = null;
     if (_activeHandle != null) {
@@ -227,14 +295,30 @@ class AudioPlayerService {
 
   void dispose() {
     _progressTimer?.cancel();
-    if (_activeHandle != null) {
-      _soloud.stop(_activeHandle!);
+    _progressTimer = null;
+    // 关键修复：dispose 路径所有 SoLoud 调用加 try/catch 兜底。
+    // Flutter 2.x 上 iOS 偶发 "Callback invoked after it has been deleted"
+    // 即 _soloud.stop/disposeSource 抛 native exception 上来。
+    // 兜底：吞掉异常，避免 dispose 链把异常冒泡到 AppState.dispose()。
+    try {
+      if (_activeHandle != null) {
+        _soloud.stop(_activeHandle!);
+      }
+    } catch (e) {
+      // #region agent log
+      debugPrint('[AudioPlayer] dispose stop ERROR: $e');
+      // #endregion
     }
-    if (_streamHandle != null) {
-      _soloud.disposeSource(_streamHandle!);
+    try {
+      if (_streamHandle != null) {
+        _soloud.disposeSource(_streamHandle!);
+      }
+    } catch (e) {
+      // #region agent log
+      debugPrint('[AudioPlayer] dispose disposeSource ERROR: $e');
+      // #endregion
     }
     _streamHandle = null;
     _activeHandle = null;
-    // 不 deinit SoLoud（全局单例，可能别处还要用）
   }
 }

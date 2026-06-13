@@ -68,13 +68,24 @@ class AudioRecorderService {
     _pcmSink = _pcmFile!.openWrite();
     print('[AudioRecorder] pcm file=${_pcmFile!.path}');
 
+    // 禁用 record 插件的音频会话管理，由 AppDelegate 统一配置
+    // 避免 record 启动时覆盖 SoLoud 的 AVAudioEngine 回调导致 SIGABRT
+    await _recorder.ios?.manageAudioSession(false);
+
     // 16KHz mono PCM：每秒 32000 字节
     await _recorder.start(
-      const RecordConfig(
+      RecordConfig(
         encoder: AudioEncoder.pcm16bits,
         sampleRate: 16000,
         numChannels: 1,
         bitRate: 256000,
+        iosConfig: const IosRecordConfig(
+          categoryOptions: [
+            IosAudioCategoryOption.mixWithOthers,
+            IosAudioCategoryOption.defaultToSpeaker,
+            IosAudioCategoryOption.allowBluetooth,
+          ],
+        ),
       ),
       path: _pcmFile!.path,
     );
@@ -183,6 +194,15 @@ class AudioRecorderService {
     _pcmFile = null;
     _httpClient?.close();
     _httpClient = null;
-    await _recorder.dispose();
+    // 关键修复（H_Rec_Dispose）：dispose() 内部回调链可能抛
+    // "Callback invoked after it has been deleted"（iOS native 偶发）。
+    // 兜底：吞掉异常，避免 dispose 链把异常冒泡到 AppState.dispose()。
+    try {
+      await _recorder.dispose();
+    } catch (e) {
+      // #region agent log
+      debugPrint('[AudioRecorder] dispose ERROR: $e');
+      // #endregion
+    }
   }
 }

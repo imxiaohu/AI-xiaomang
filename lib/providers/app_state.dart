@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
@@ -21,6 +22,31 @@ import '../config/env_config.dart';
 /// 全局业务状态编排
 /// 管理：SSE连接生命周期、录音/抽帧/推理/播报时序、自动降级触发
 class AppState extends ChangeNotifier {
+  // debug ingest (session deae74) — append NDJSON to local file
+  static const String _dbgPath = '/Users/xiaohu/Downloads/AIVideo/.cursor/debug-deae74.log';
+  static const String _dbgSession = 'deae74';
+  void _dbg(String location, String message, Map<String, dynamic> data, {String hypothesisId = 'H?'}) {
+    // #region agent log
+    try {
+      // ignore: avoid_print
+      print('[AppStateDbg] $location $message $data');
+      final obj = {
+        'sessionId': _dbgSession,
+        'id': 'log_${DateTime.now().millisecondsSinceEpoch}_app',
+        'timestamp': DateTime.now().millisecondsSinceEpoch,
+        'location': location,
+        'message': message,
+        'data': data,
+        'runId': 'pre-fix',
+        'hypothesisId': hypothesisId,
+      };
+      final f = File(_dbgPath);
+      f.parent.createSync(recursive: true);
+      f.writeAsStringSync('${jsonEncode(obj)}\n', mode: FileMode.append, flush: false);
+    } catch (_) {}
+    // #endregion
+  }
+
   // ==============================
   // 运行模式
   // 默认云端：connectCloud() 内置 max_reconnect 自动回退 offline
@@ -473,11 +499,32 @@ class AppState extends ChangeNotifier {
     if (_sessionId.isEmpty) {
       _sessionId = DateTime.now().millisecondsSinceEpoch.toString();
     }
+    // 预初始化音频引擎，避免首帧音频到达时才 init 导致竞态丢帧
+    _audioPlayer?.preInit();
+    // 关键修复（terminals/2.txt line 70-71, 250-340 多次 connect_enter / omni_audio 重复 3 次）：
+    // 每次 _connectCloud() 都 new SseStreamService，但**没有先释放旧实例**。
+    // 旧实例的 SSE 连接留在 background 持续消费 EventBus 事件，
+    // 导致同一 eid 被多个订阅者各处理一次 → onAudio / onEnd 被回调多次 →
+    // 同一段 PCM 被 enqueue 多次 → SoLoud buffer 翻倍 / 顺序错乱 / 听感卡顿。
+    // 修复：new 之前先 dispose 旧实例（包括 SSE 连接 + 后台 reconnect timer）。
+    final oldSse = _sseService;
     _sseService = SseStreamService(
       baseUrl: backendBaseUrl,
       sessionId: _sessionId,
       token: authToken,
     );
+    if (oldSse != null) {
+      // dispose 是同步设置 _disposed=true 并 cancel 内部 timers / stream subscription；
+      // 即使旧连接还在 background 消费，disconnect() 后 _handleData 会立即早返回。
+      // 这里调一次，确保旧 SseStreamService 不再向 onText/onAudio 派发。
+      try {
+        oldSse.disconnect();
+      } catch (e) {
+        // #region agent log
+        debugPrint('[AppState] _connectCloud: old SSE dispose threw: $e');
+        // #endregion
+      }
+    }
     _sseService!.onConnected = () {
       _connectionStatus = ConnectionStatus.connected;
       notifyListeners();
@@ -536,6 +583,12 @@ class AppState extends ChangeNotifier {
       }
     };
     _sseService!.onAudio = (chunk) {
+      // #region agent log
+      _dbg('app_state.dart:onAudio', 'onAudio_vl', {
+        'b64_len': chunk.base64Audio.length,
+        'vlTtsAudioStarted_was': _vlTtsAudioStarted,
+      }, hypothesisId: 'H3');
+      // #endregion
       // VL+TTS 模式：首个音频分片到达时初始化播放流
       if (!_vlTtsAudioStarted) {
         _vlTtsAudioStarted = true;
@@ -544,6 +597,12 @@ class AppState extends ChangeNotifier {
       _audioPlayer?.enqueuePcm(chunk.base64Audio);
     };
     _sseService!.onOmniAudio = (chunk) {
+      // #region agent log
+      _dbg('app_state.dart:onOmniAudio', 'onOmniAudio', {
+        'b64_len': chunk.base64Audio.length,
+        'omniAudioStarted_was': _omniAudioStarted,
+      }, hypothesisId: 'H3');
+      // #endregion
       // Omni 模式：首个音频分片到达时初始化播放流
       if (!_omniAudioStarted) {
         _omniAudioStarted = true;
@@ -569,6 +628,14 @@ class AppState extends ChangeNotifier {
       // 服务端已提交音频缓冲，等待响应
     };
     _sseService!.onEnd = (end) {
+      // #region agent log
+      _dbg('app_state.dart:onEnd', 'onEnd_received', {
+        'fullText': end.fullText,
+        'audioSeconds': end.audioSeconds,
+        'totalAudioChunks': end.totalAudioChunks,
+        'aiStatus_before': _aiStatus.toString(),
+      }, hypothesisId: 'H2');
+      // #endregion
       // 取消兜底计时器：end 到了说明推理正常完成
       _cancelInferenceTimeout();
       // 关键：end 事件到达时，把累积的 PCM 立刻刷完播放
@@ -861,6 +928,12 @@ class AppState extends ChangeNotifier {
           _currentStreamingText = '';
           _userMessageSaved = false;
           _aiStatus = AiStatus.idle;
+          // 关键修复（terminals/2.txt line 41, 66 两次 timeout 后无 flush）：
+          // 30s 兜底 goIdle 之前先 flush audio player，
+          // 否则 SoLoud native 端的 stream 一直占着，下一轮 startNewTurn 才被抢断，
+          // 听感上是"两段音频叠在一起" / 静音后才发声。
+          // 兜底：调一次 flushPending；播放器内部 _ended 已生效，重复调是 no-op。
+          _audioPlayer?.flushPending();
           notifyListeners();
         }
       },

@@ -219,22 +219,19 @@ class OmniService:
                         full_text = transcript or user_text or ""
 
                     # 模型流式音频（直接播放）
-                elif msg_type == "response.audio.delta":
-                    delta = msg.get("delta", "")
-                    if delta:
-                        try:
-                            # delta 已经是 base64 编码的 PCM 24kHz mono S16LE
-                            # 直接转发，无需解码再重编码
-                            audio_chunk_count += 1
-                            # 估算音频时长：base64 长度 * 3/4 / (sample_rate * bytes_per_sample)
-                            chunk_bytes_len = len(delta) * 3 // 4
-                            audio_seconds += chunk_bytes_len / (24000 * 2)
-                            await self._event_bus.publish({
-                                "event": "omni_audio",
-                                "data": json.dumps({"audio": delta, "index": audio_chunk_count}),
-                            })
-                        except Exception:
-                            pass
+                    elif msg_type == "response.audio.delta":
+                        delta = msg.get("delta", "")
+                        if delta:
+                            try:
+                                audio_chunk_count += 1
+                                raw_len = (len(delta) * 3) >> 2
+                                audio_seconds += raw_len / (24000 * 2)
+                                await event_bus.publish({
+                                    "event": "omni_audio",
+                                    "data": json.dumps({"audio": delta, "index": audio_chunk_count}),
+                                })
+                            except Exception:
+                                pass
 
                     # 模型流式文本（回复内容）
                     elif msg_type == "response.audio_transcript.delta":
