@@ -125,8 +125,6 @@ class OmniService:
                         "type": "input_audio_buffer.append",
                         "audio": chunk_b64,
                     }))
-                    # 略作延迟，避免发送过快
-                    await asyncio.sleep(0.01)
 
                 # ── 3. 发送图像帧 ────────────────────────────────
                 if frame_b64:
@@ -180,7 +178,6 @@ class OmniService:
 
                     last_event_time = asyncio.get_running_loop().time()
                     msg_type = msg.get("type", "")
-                    print(f"[Omni] recv event type={msg_type!r}")
 
                     # VAD 事件
                     if msg_type == "input_audio_buffer.speech_started":
@@ -222,20 +219,22 @@ class OmniService:
                         full_text = transcript or user_text or ""
 
                     # 模型流式音频（直接播放）
-                    elif msg_type == "response.audio.delta":
-                        delta = msg.get("delta", "")
-                        if delta:
-                            try:
-                                chunk_bytes = base64.b64decode(delta)
-                                chunk_b64 = base64.b64encode(chunk_bytes).decode()
-                                audio_chunk_count += 1
-                                audio_seconds += len(chunk_bytes) / (24000 * 2)
-                                await event_bus.publish({
-                                    "event": "omni_audio",
-                                    "data": json.dumps({"audio": chunk_b64, "index": audio_chunk_count}),
-                                })
-                            except Exception:
-                                pass
+                elif msg_type == "response.audio.delta":
+                    delta = msg.get("delta", "")
+                    if delta:
+                        try:
+                            # delta 已经是 base64 编码的 PCM 24kHz mono S16LE
+                            # 直接转发，无需解码再重编码
+                            audio_chunk_count += 1
+                            # 估算音频时长：base64 长度 * 3/4 / (sample_rate * bytes_per_sample)
+                            chunk_bytes_len = len(delta) * 3 // 4
+                            audio_seconds += chunk_bytes_len / (24000 * 2)
+                            await self._event_bus.publish({
+                                "event": "omni_audio",
+                                "data": json.dumps({"audio": delta, "index": audio_chunk_count}),
+                            })
+                        except Exception:
+                            pass
 
                     # 模型流式文本（回复内容）
                     elif msg_type == "response.audio_transcript.delta":
@@ -451,7 +450,6 @@ class OmniVadSession:
                     continue
 
                 msg_type = msg.get("type", "")
-                print(f"[OmniVad] recv: {msg_type}")
 
                 if msg_type == "input_audio_buffer.speech_started":
                     print("[OmniVad] >>> speech_started")
@@ -500,13 +498,12 @@ class OmniVadSession:
                     delta = msg.get("delta", "")
                     if delta:
                         try:
-                            chunk_bytes = base64.b64decode(delta)
-                            chunk_b64 = base64.b64encode(chunk_bytes).decode()
                             audio_chunk_count += 1
-                            audio_seconds += len(chunk_bytes) / (24000 * 2)
+                            chunk_bytes_len = len(delta) * 3 // 4
+                            audio_seconds += chunk_bytes_len / (24000 * 2)
                             await self._event_bus.publish({
                                 "event": "omni_audio",
-                                "data": json.dumps({"audio": chunk_b64, "index": audio_chunk_count}),
+                                "data": json.dumps({"audio": delta, "index": audio_chunk_count}),
                             })
                         except Exception:
                             pass

@@ -215,12 +215,12 @@ async def trigger_session_inference(session, ctx_id: str):
                 # 句子缓冲（攒到句末标点才 flush TTS）
                 audio_chunk_count = 0
 
-                async def on_tts_audio(mp3_b64: str):
+                async def on_tts_audio(pcm_b64: str):
                     nonlocal audio_chunk_count
                     audio_chunk_count += 1
                     await event_bus.publish({
                         "event": "audio",
-                        "data": json.dumps({"audio": mp3_b64, "index": audio_chunk_count}),
+                        "data": json.dumps({"audio": pcm_b64, "index": audio_chunk_count}),
                     })
 
                 if tts_ctx is None:

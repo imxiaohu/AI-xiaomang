@@ -9,16 +9,15 @@ import 'ai_3d_ball.dart';
 /// 使用 model_viewer_plus 渲染 GLB 模型（WebView + model-viewer.js）。
 ///
 /// 显示层级（从底到顶）：
-/// 1. 渲染预览图（后端生成的 webp 预览图）
-/// 2. GLB 3D模型（可拖动/缩放）
-/// 3. 生成中加载动画（覆盖在最上层）
+/// 1. GLB 3D模型（可拖动/缩放）
+/// 2. 生成中加载动画（覆盖在最上层）
 ///
 /// 无模型时回退显示原 Ai3DBall 动画球体。
 class TripoModelViewer extends StatefulWidget {
   /// GLB 模型 URL（带 scheme 的绝对地址，model_viewer_plus iOS 端不接受相对路径）
   final String? modelUrl;
 
-  /// 渲染预览图 URL
+  /// 渲染预览图 URL（已不再用于展示，保留字段以兼容调用方）
   final String? previewImageUrl;
 
   /// 是否正在生成中
@@ -81,19 +80,12 @@ class TripoModelViewer extends StatefulWidget {
 
 class _TripoModelViewerState extends State<TripoModelViewer> {
   bool _modelLoadFailed = false;
-  int _previewRetry = 0;
-  String? _lastPreviewUrl;
 
   @override
   void didUpdateWidget(TripoModelViewer old) {
     super.didUpdateWidget(old);
     if (old.modelUrl != widget.modelUrl && widget.modelUrl != null) {
       _modelLoadFailed = false;
-    }
-    if (old.previewImageUrl != widget.previewImageUrl &&
-        widget.previewImageUrl != _lastPreviewUrl) {
-      _previewRetry = 0;
-      _lastPreviewUrl = widget.previewImageUrl;
     }
   }
 
@@ -118,20 +110,13 @@ class _TripoModelViewerState extends State<TripoModelViewer> {
           child: Stack(
             alignment: Alignment.center,
             children: [
-              if (widget.previewImageUrl != null)
-                Positioned.fill(child: _buildPreviewImage()),
-
               if (widget.modelUrl != null && !_modelLoadFailed)
                 Positioned.fill(child: _buildModelViewer()),
 
-              if (_modelLoadFailed && widget.previewImageUrl != null)
-                Positioned.fill(child: _buildPreviewImage(showError: true)),
+              if (_modelLoadFailed)
+                Positioned.fill(child: _buildModelLoadFailed()),
 
-              if (widget.isGenerating ||
-                  (_modelLoadFailed == false &&
-                      widget.modelUrl != null &&
-                      widget.isGenerating == false))
-                _buildLoadingOverlay(),
+              if (widget.isGenerating) _buildLoadingOverlay(),
 
               if (widget.isGenerating &&
                   widget.canCancel &&
@@ -170,65 +155,30 @@ class _TripoModelViewerState extends State<TripoModelViewer> {
     );
   }
 
-  Widget _buildPreviewImage({bool showError = false}) {
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        ClipRRect(
-          borderRadius: BorderRadius.circular(12),
-          child: Image.network(
-            widget.previewImageUrl!,
-            fit: BoxFit.cover,
-            width: 200,
-            height: 200,
-            errorBuilder: (_, error, stack) {
-              if (_previewRetry < 1) {
-                _previewRetry += 1;
-                Future.delayed(const Duration(seconds: 2), () {
-                  if (mounted) {
-                    setState(() {
-                      _lastPreviewUrl = null;
-                    });
-                  }
-                });
-              }
-              return Container(
-                width: 200,
-                height: 200,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(12),
-                  gradient: const LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: [Color(0x994D6AFF), Color(0x996B4EFF)],
-                  ),
-                ),
-              );
-            },
-          ),
+  Widget _buildModelLoadFailed() {
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0x994D6AFF), Color(0x996B4EFF)],
         ),
-        if (showError)
-          Container(
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(12),
-              color: Colors.black54,
+      ),
+      child: const Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.broken_image, color: Colors.white70, size: 32),
+            SizedBox(height: 8),
+            Text(
+              '3D模型加载失败\n请稍后重试',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.white70, fontSize: 12),
             ),
-            child: const Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.broken_image, color: Colors.white70, size: 32),
-                  SizedBox(height: 8),
-                  Text(
-                    '3D模型加载失败\n可拖动查看预览图',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(color: Colors.white70, fontSize: 12),
-                  ),
-                ],
-              ),
-            ),
-          ),
-      ],
+          ],
+        ),
+      ),
     );
   }
 
@@ -244,7 +194,6 @@ class _TripoModelViewerState extends State<TripoModelViewer> {
         disableZoom: false,
         backgroundColor: Colors.transparent,
         loading: Loading.eager,
-        poster: widget.previewImageUrl,
         shadowIntensity: 0.5,
         exposure: 0.9,
         interactionPrompt: InteractionPrompt.auto,
@@ -256,44 +205,41 @@ class _TripoModelViewerState extends State<TripoModelViewer> {
   }
 
   Widget _buildLoadingOverlay() {
-    final showSpinner = widget.isGenerating;
     return Container(
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(12),
         color: Colors.black.withValues(alpha: 0.5),
       ),
       child: Center(
-        child: showSpinner
-            ? Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const SizedBox(
-                    width: 48,
-                    height: 48,
-                    child: CircularProgressIndicator(
-                      color: Color(0xff635bff),
-                      strokeWidth: 3,
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  if (widget.progress != null) ...[
-                    SizedBox(
-                      width: 120,
-                      child: LinearProgressIndicator(
-                        value: widget.progress,
-                        backgroundColor: Colors.white24,
-                        valueColor: const AlwaysStoppedAnimation(Color(0xff635bff)),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                  ],
-                  Text(
-                    widget.statusText ?? 'AI 正在生成 3D 模型…',
-                    style: const TextStyle(color: Colors.white70, fontSize: 12),
-                  ),
-                ],
-              )
-            : const SizedBox.shrink(),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(
+              width: 48,
+              height: 48,
+              child: CircularProgressIndicator(
+                color: Color(0xff635bff),
+                strokeWidth: 3,
+              ),
+            ),
+            const SizedBox(height: 12),
+            if (widget.progress != null) ...[
+              SizedBox(
+                width: 120,
+                child: LinearProgressIndicator(
+                  value: widget.progress,
+                  backgroundColor: Colors.white24,
+                  valueColor: const AlwaysStoppedAnimation(Color(0xff635bff)),
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
+            Text(
+              widget.statusText ?? 'AI 正在生成 3D 模型…',
+              style: const TextStyle(color: Colors.white70, fontSize: 12),
+            ),
+          ],
+        ),
       ),
     );
   }

@@ -16,11 +16,14 @@ dependencies:
   # 音视频采集
   camera: ^0.11.0+2
 
-  # 音频播放（阿里云MP3流式播放）
-  # audioplayers: ^6.0.0
-  # 改用 just_audio：iOS 上 BytesSource 频繁切换临时文件导致卡顿，
-  # just_audio 支持 LockCaching + AudioPipeline，串行小 chunk 平滑。
-  just_audio: ^0.9.40
+  # 音频播放（PCM 24kHz mono S16LE 流式）
+  # 历史：just_audio 在 iOS 上 BytesSource 频繁切换临时文件触发 AVPlayer 状态机错乱
+  #       （错误码 -11828 "Cannot Open"），导致一截一截卡顿。audioplayers 同样不行。
+  # 切到 flutter_soloud（SoLoud C++ 引擎 + AVAudioEngine 之上）：
+  #   - setBufferStream() 建立原生 PCM ring buffer，每 chunk 直接 addAudioDataStream
+  #   - AVAudioPlayerNode 真正 gapless，无 prepare 间隙
+  #   - 单 turn 1 个 active audio source，0 transition
+  flutter_soloud: ^4.0.9
 
   # TTS（离线模式本地播报）
   flutter_tts: ^4.0.2

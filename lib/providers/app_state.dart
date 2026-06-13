@@ -92,6 +92,8 @@ class AppState extends ChangeNotifier {
   String _currentStreamingText = '';
   String get currentStreamingText => _currentStreamingText;
   bool _userMessageSaved = false; // 当前轮次用户转录是否已保存
+  bool _vlTtsAudioStarted = false; // VL+TTS 模式：当前轮次是否已初始化音频流
+  bool _omniAudioStarted = false; // Omni 模式：当前轮次是否已初始化音频流
 
   // 推理兜底计时器：thinking 超过 30s 自动 goIdle + 兜底消息
   Timer? _inferenceTimeoutTimer;
@@ -288,6 +290,12 @@ class AppState extends ChangeNotifier {
     _activeMarketplaceModelId = _settings.activeMarketplaceModelId;
     notifyListeners();
 
+    // 启动后台任务：恢复上次选用的 3D 形象（不阻塞 init()）
+    // marketplace getter 内部懒加载 MarketplaceService，自身异步，
+    // 因此可以在 _initTripo() 之前就发起，不会卡 init 流程。
+    // ignore: discarded_futures
+    _restoreActiveMarketplaceInBackground();
+
     // 检测硬件
     _hardwareInfo = await HardwareInfo.detect();
     _degradationLevel = _hardwareInfo?.recommendedDegradation ?? AiDegradationLevel.reduced;
@@ -389,6 +397,32 @@ class AppState extends ChangeNotifier {
       debugPrint('[AppState] Offline engine init error: $e');
       _simulationMode = true;
       _modelLoadProgress = 1.0;
+      notifyListeners();
+    }
+  }
+
+  /// 后台恢复上次选用的市场 3D 形象（修 bug：重启后没有自动应用显示 3D 形象）
+  ///
+  /// - 调 GET 而非 download：避免每次冷启动都自增下载计数
+  /// - 后端不可达 / 模型已被删：清掉持久化的 ID，避免 activeGlbUrl 永久 null
+  Future<void> _restoreActiveMarketplaceInBackground() async {
+    final modelId = _activeMarketplaceModelId;
+    if (modelId == null || modelId.isEmpty) return;
+    try {
+      // marketplace getter 懒加载 MarketplaceService，使用 _settings 里已加载的
+      // backendBaseUrl / authToken。失败时降级：清掉持久化 ID。
+      final item = await marketplace.get(modelId);
+      _activeMarketplaceItem = item;
+      notifyListeners();
+      debugPrint('[AppState] Restored active marketplace model: $modelId');
+    } catch (e) {
+      debugPrint('[AppState] Failed to restore active marketplace model $modelId: $e');
+      // 模型已不存在 / 服务异常 → 清掉持久化 ID，避免每次启动都失败
+      _activeMarketplaceModelId = null;
+      _activeMarketplaceItem = null;
+      _settings = _settings.copyWith(activeMarketplaceModelId: null);
+      // ignore: discarded_futures
+      _settingsService.save(_settings);
       notifyListeners();
     }
   }
@@ -502,9 +536,19 @@ class AppState extends ChangeNotifier {
       }
     };
     _sseService!.onAudio = (chunk) {
-      _audioPlayer?.enqueue(chunk.base64Audio);
+      // VL+TTS 模式：首个音频分片到达时初始化播放流
+      if (!_vlTtsAudioStarted) {
+        _vlTtsAudioStarted = true;
+        _audioPlayer?.startNewTurn();
+      }
+      _audioPlayer?.enqueuePcm(chunk.base64Audio);
     };
     _sseService!.onOmniAudio = (chunk) {
+      // Omni 模式：首个音频分片到达时初始化播放流
+      if (!_omniAudioStarted) {
+        _omniAudioStarted = true;
+        _audioPlayer?.startNewTurn();
+      }
       _audioPlayer?.enqueuePcm(chunk.base64Audio);
     };
     _sseService!.onOmniSpeechStarted = () {
@@ -527,9 +571,11 @@ class AppState extends ChangeNotifier {
     _sseService!.onEnd = (end) {
       // 取消兜底计时器：end 到了说明推理正常完成
       _cancelInferenceTimeout();
-      // 关键：end 事件到达时，把 Omni 累积的 PCM 立刻拼成 WAV 播放，
-      // 避免 < 200ms 的尾段留到下次 turn 一起播（那会延迟 200ms+）
+      // 关键：end 事件到达时，把累积的 PCM 立刻刷完播放
       _audioPlayer?.flushPending();
+      // 重置音频流标记
+      _vlTtsAudioStarted = false;
+      _omniAudioStarted = false;
       // 修复5：如果只有用户转录没有模型回复，保存为用户消息
       if (!_userMessageSaved && _currentStreamingText.isNotEmpty) {
         addUserMessage(_currentStreamingText);
@@ -642,6 +688,8 @@ class AppState extends ChangeNotifier {
     _recordingTimer?.cancel();
     _recordingSeconds = 0;
     _aiStatus = AiStatus.thinking;
+    _vlTtsAudioStarted = false;
+    _omniAudioStarted = false;
     notifyListeners();
 
     // 关键：必须先 await 录音器完成"最后一块 chunk + end=true"信号的上传，
@@ -685,6 +733,8 @@ class AppState extends ChangeNotifier {
     } else if (_aiStatus == AiStatus.listening) {
       // 手动停止录音
       _aiStatus = AiStatus.thinking;
+      _vlTtsAudioStarted = false;
+      _omniAudioStarted = false;
       notifyListeners();
       await _audioRecorder?.stopRecording();
       _videoCapture?.stopCapture();

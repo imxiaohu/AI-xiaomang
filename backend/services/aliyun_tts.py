@@ -18,6 +18,7 @@ class AliyunTTS:
     认证：DASHSCOPE_API_KEY（百炼平台 API Key）
     模型：qwen3-tts-flash-realtime（推荐，Qwen3-TTS 最新版）
     协议：wss://dashscope.aliyuncs.com/api-ws/v1/realtime
+    输出格式：PCM 24kHz mono S16LE（与 Omni 模式共用前端播放路径）
 
     commit 模式：客户端主动提交触发合成（适合对话逐轮合成）
     server_commit 模式：服务端自动处理文本分段与合成时机（适合大段文本）
@@ -101,8 +102,8 @@ class AliyunTTS:
         text: str,
     ) -> str:
         """
-        一次性合成（等待完整 MP3，返回 base64）
-        返回完整 MP3 base64 字符串
+        一次性合成（等待完整 PCM，返回 base64）
+        返回完整 PCM 24kHz mono S16LE base64 字符串
         """
         if not self.is_configured:
             raise RuntimeError("DASHSCOPE_API_KEY not configured")
@@ -114,14 +115,14 @@ class AliyunTTS:
         if not sentences:
             return ""
 
-        mp3_buffer = b""
+        pcm_buffer = b""
 
         async with websockets.connect(url, additional_headers=headers, ping_interval=30) as ws:
             await ws.send(json.dumps({
                 "type": "session.update",
                 "session": {
                     "model": self._model,
-                    "audio": {"format": "mp3"},
+                    "audio": {"format": "pcm", "sample_rate": 24000},
                     "mode": "server_commit",
                 },
             }))
@@ -138,10 +139,10 @@ class AliyunTTS:
 
             await ws.send(json.dumps({"type": "input_text.flush"}))
 
-            mp3_buffer = b""
+            pcm_buffer = b""
             async for raw in ws:
                 if isinstance(raw, bytes):
-                    mp3_buffer += raw
+                    pcm_buffer += raw
                 else:
                     msg = json.loads(raw)
                     msg_type = msg.get("type", "")
@@ -149,9 +150,16 @@ class AliyunTTS:
                         break
                     if msg_type == "error":
                         print(f"[AliyunTTS] Error: {msg}")
+                    if msg_type == "content":
+                        audio_data = msg.get("audio", {})
+                        data_b64 = audio_data.get("data", "")
+                        if data_b64:
+                            pcm_buffer += base64.b64decode(data_b64)
+                    if msg_type == "task-finished":
+                        break
 
-        if mp3_buffer:
-            return base64.b64encode(mp3_buffer).decode()
+        if pcm_buffer:
+            return base64.b64encode(pcm_buffer).decode()
         return ""
 
     # ──────────────────────────────────────────────────────────────
@@ -165,8 +173,8 @@ class AliyunTTS:
         """
         启动流式 TTS 连接，返回 TTSStreamContext（上下文管理器）。
 
-        on_audio: 回调，接收 MP3 分片 base64，实时推送
-                  调用方在回调中把 MP3 base64 发给前端播放
+        on_audio: 回调，接收 PCM 24kHz mono S16LE 分片 base64，实时推送
+                  调用方在回调中把 PCM base64 发给前端播放
 
         用法（asyncio 并行）：
             tts_ctx = await tts.synthesize_stream(on_audio=my_callback)
@@ -237,7 +245,7 @@ class TTSStreamContext:
     """
     TTS 流式上下文管理器。
 
-    用于：VL 流式 token → TTS 增量追加 → MP3 分片实时推送。
+    用于：VL 流式 token → TTS 增量追加 → PCM 24kHz mono S16LE 分片实时推送。
     """
 
     def __init__(
@@ -275,7 +283,7 @@ class TTSStreamContext:
             "type": "session.update",
             "session": {
                 "model": self._model,
-                "audio": {"format": "mp3"},
+                "audio": {"format": "pcm"},
                 "voice": self._voice,
                 # commit 模式：客户端控制提交时机（适合逐 token 追加）
                 "mode": "commit",
@@ -377,14 +385,14 @@ class TTSStreamContext:
         if self._ws is None:
             return
 
-        mp3_buffer = b""
+        pcm_buffer = b""
         try:
             async for raw in self._ws:
                 if self._closed:
                     break
 
                 if isinstance(raw, bytes):
-                    mp3_buffer += raw
+                    pcm_buffer += raw
                     continue
 
                 try:
@@ -401,14 +409,14 @@ class TTSStreamContext:
                     if data_b64 and self._on_audio:
                         self._on_audio(data_b64)
 
-                    # 累积二进制 MP3 数据
+                    # 累积二进制 PCM 数据
                     # （CosyVoice 也可能直接返回二进制帧）
 
                 # 会话结束
                 elif msg_type == "session.finish":
-                    # 最后残留的 MP3 数据
-                    if mp3_buffer:
-                        chunk_b64 = base64.b64encode(mp3_buffer).decode()
+                    # 最后残留的 PCM 数据
+                    if pcm_buffer:
+                        chunk_b64 = base64.b64encode(pcm_buffer).decode()
                         if self._on_audio:
                             self._on_audio(chunk_b64)
                     break
@@ -417,10 +425,10 @@ class TTSStreamContext:
                 elif msg_type == "error":
                     print(f"[AliyunTTS] Error: {msg}")
 
-                # task 结束时也发残留 MP3
+                # task 结束时也发残留 PCM
                 elif msg_type == "task-finished":
-                    if mp3_buffer:
-                        chunk_b64 = base64.b64encode(mp3_buffer).decode()
+                    if pcm_buffer:
+                        chunk_b64 = base64.b64encode(pcm_buffer).decode()
                         if self._on_audio:
                             self._on_audio(chunk_b64)
                     break

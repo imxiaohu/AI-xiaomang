@@ -170,6 +170,7 @@ class SseStreamService {
         break;
       case 'audio':
         final json = jsonDecode(eventData) as Map<String, dynamic>;
+        // VL+TTS 模式：PCM 24kHz mono S16LE（与 Omni 共用格式）
         onAudio?.call(SseAudioChunk(
           base64Audio: json['audio'] as String? ?? '',
           sampleIndex: json['index'] as int? ?? 0,
@@ -201,7 +202,7 @@ class SseStreamService {
       case 'omni_committed':
         onOmniCommitted?.call();
         break;
-      // Omni 音频流（PCM 24kHz stereo）
+      // Omni 音频流（PCM 24kHz mono S16LE）
       case 'omni_audio':
         final json = jsonDecode(eventData) as Map<String, dynamic>;
         onOmniAudio?.call(SseAudioChunk(

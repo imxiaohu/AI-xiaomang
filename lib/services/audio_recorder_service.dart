@@ -163,12 +163,26 @@ class AudioRecorderService {
     onRecordingStop?.call();
   }
 
-  void dispose() {
+  Future<void> dispose() async {
     _chunkTimer?.cancel();
-    _recorder.stop();
-    _pcmSink?.close();
-    _pcmFile?.delete();
+    _chunkTimer = null;
+    // ⚠️ 必须先 await stop，让 iOS / Android 原生录音线程结束，
+    // 否则 dispose() 释放 MethodChannel 后，回调仍会投递给已销毁的 this，
+    // 触发 "Callback invoked after it has been deleted" SIGABRT。
+    if (_isRecording) {
+      try {
+        await _recorder.stop();
+      } catch (_) {}
+    }
+    await _pcmSink?.flush();
+    await _pcmSink?.close();
+    _pcmSink = null;
+    try {
+      await _pcmFile?.delete();
+    } catch (_) {}
+    _pcmFile = null;
     _httpClient?.close();
-    _recorder.dispose();
+    _httpClient = null;
+    await _recorder.dispose();
   }
 }
