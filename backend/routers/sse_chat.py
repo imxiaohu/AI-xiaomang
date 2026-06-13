@@ -62,14 +62,13 @@ async def sse_event_stream(ctx_id: str, token: str) -> AsyncGenerator[dict, None
     except asyncio.CancelledError:
         if inference_task:
             inference_task.cancel()
-        raise
-    finally:
-        heartbeat_task.cancel()
-        if inference_task:
             try:
                 await inference_task
             except asyncio.CancelledError:
                 pass
+        raise
+    finally:
+        heartbeat_task.cancel()
 
 
 def _split_sentences_for_sse(text: str) -> list[str]:
@@ -122,11 +121,7 @@ async def trigger_session_inference(session, ctx_id: str):
         session.sse_queue = sse_queue
 
     if session.inference_task and not session.inference_task.done():
-        session.inference_task.cancel()
-        try:
-            await session.inference_task
-        except asyncio.CancelledError:
-            pass
+        session.cancel_inference()
 
     full_text = ""
     total_audio_chunks = 0

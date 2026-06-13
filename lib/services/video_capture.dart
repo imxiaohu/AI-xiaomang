@@ -139,8 +139,8 @@ class VideoCaptureService {
 
   Future<void> _uploadFrame(Uint8List jpgBytes) async {
     final encoded = base64Encode(jpgBytes);
+    final client = http.Client();
     try {
-      final client = http.Client();
       await client.post(
         Uri.parse('$baseUrl/upload/frame'),
         headers: {'Content-Type': 'application/json'},
@@ -150,8 +150,10 @@ class VideoCaptureService {
           'index': _frameIndex,
         }),
       );
-      client.close();
     } catch (_) {}
+    finally {
+      client.close();
+    }
   }
 
   /// 最新一帧的JPG数据（供离线VL推理使用）

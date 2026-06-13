@@ -58,7 +58,13 @@ class AliyunASR:
         headers = {"Authorization": f"Bearer {self._api_key}"}
 
         try:
-            self._ws = await websockets.connect(url, extra_headers=headers, ping_interval=30)
+            self._ws = await websockets.connect(
+                url,
+                extra_headers=headers,
+                ping_interval=30,
+                open_timeout=10,
+                close_timeout=5,
+            )
             self._connected = True
             self._task = asyncio.create_task(self._recv_loop())
             # 发送会话参数

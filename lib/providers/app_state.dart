@@ -155,6 +155,7 @@ class AppState extends ChangeNotifier {
 
     // 初始化TTS
     _ttsService = TtsService();
+    _ttsService!.onSpeakComplete = () => goIdle();
     await _ttsService!.init();
 
     // 初始化音频播放器
@@ -180,6 +181,10 @@ class AppState extends ChangeNotifier {
     _offlineEngine = OfflineAIEngine();
     _offlineEngine!.onWhisperResult = (text) {
       debugPrint('[AppState] Whisper result: $text');
+      // 云端模式：Whisper 识别完成后也要显示到 ChatPanel
+      if (_runMode == AppRunMode.cloudAliyun) {
+        addUserMessage(text);
+      }
     };
     _offlineEngine!.onVLResult = (text) {
       debugPrint('[AppState] VL result: $text');
@@ -366,6 +371,7 @@ class AppState extends ChangeNotifier {
       _sseService?.endTurn();
       // 等待SSE推送（thinking状态保持）
       // 用户提问文本在SSE onText -> currentStreamingText -> addAiMessage 中处理
+      // 注意：云端模式下 Whisper 在客户端执行，转写结果在 onWhisperResult 中 addUserMessage
     } else {
       // 离线推理：Whisper ASR + Qwen-VL 视觉理解 + 本地回答
       try {
@@ -419,7 +425,6 @@ class AppState extends ChangeNotifier {
       _backgroundService?.start();
       final lastAiMsg = _messages.lastOrNull;
       if (lastAiMsg != null) {
-        _ttsService?.onSpeakComplete = () => goIdle();
         _ttsService?.speak(lastAiMsg.text);
       }
     }

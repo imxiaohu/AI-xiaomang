@@ -36,10 +36,8 @@ class _Ai3DBallState extends State<Ai3DBall> {
 
   Future<void> _check3DCapability() async {
     bool can3D = true;
-
     if (Platform.isIOS) {
-      final brightness = MediaQuery.platformBrightnessOf(context);
-      if (brightness == Brightness.dark) can3D = false;
+      // iOS暗色模式不影响3D能力，始终允许
     }
 
     final hw = widget.hardwareInfo;
@@ -179,8 +177,8 @@ class _Enhanced3DBallState extends State<_Enhanced3DBall>
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _ctrl,
+    return ListenableBuilder(
+      listenable: _ctrl,
       builder: (ctx, _) {
         double scale = _scaleAnim.value;
         if (widget.status == AiStatus.speaking) {
@@ -305,8 +303,8 @@ class _RippleState extends State<_Ripple> with SingleTickerProviderStateMixin {
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _ctrl,
+    return ListenableBuilder(
+      listenable: _ctrl,
       builder: (ctx, _) {
         final progress = (_ctrl.value + widget.index * 0.33) % 1.0;
         final size = 120.0 + progress * 50;

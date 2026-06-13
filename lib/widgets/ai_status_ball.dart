@@ -188,8 +188,8 @@ class _AiStatusBallState extends State<AiStatusBall>
               ],
               // 思考状态：光晕
               if (widget.status == AiStatus.thinking)
-                AnimatedBuilder(
-                  animation: _glowAnim,
+                ListenableBuilder(
+                  listenable: _glowAnim,
                   builder: (ctx, _) {
                     return Container(
                       width: 140,
@@ -209,8 +209,8 @@ class _AiStatusBallState extends State<AiStatusBall>
                   },
                 ),
               // 核心球体
-              AnimatedBuilder(
-                animation: Listenable.merge([_scaleAnim, _rotateAnim]),
+              ListenableBuilder(
+                listenable: Listenable.merge([_scaleAnim, _rotateAnim]),
                 builder: (ctx, child) {
                   // speaking状态：根据TTS音量动态调整缩放
                   double scale = _scaleAnim.value;
@@ -222,8 +222,8 @@ class _AiStatusBallState extends State<AiStatusBall>
                     transform: Matrix4.diagonal3Values(scale, scale, 1.0)
                       ..rotateZ(_rotateAnim.value * math.pi / 180),
                     child: widget.status == AiStatus.thinking
-                        ? AnimatedBuilder(
-                            animation: _floatAnim,
+                        ? ListenableBuilder(
+                            listenable: _floatAnim,
                             builder: (ctx, child) {
                               return Transform.translate(
                                 offset: Offset(0, _floatAnim.value),
@@ -275,8 +275,8 @@ class _AiStatusBallState extends State<AiStatusBall>
 
   /// 构建扩散波纹圈
   Widget _buildRipple(int index) {
-    return AnimatedBuilder(
-      animation: _rippleCtrl,
+    return ListenableBuilder(
+      listenable: _rippleCtrl,
       builder: (ctx, _) {
         // 每圈延迟偏移
         final progress = (_rippleCtrl.value + index * 0.33) % 1.0;

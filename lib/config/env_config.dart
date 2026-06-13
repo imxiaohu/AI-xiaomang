@@ -8,7 +8,7 @@ class BackendConfig {
   /// 在 DEBUG 模式下默认为 localhost，生产构建请通过 --dart-define 注入
   static const String baseUrl = String.fromEnvironment(
     'backend.url',
-    defaultValue: 'http://localhost:8000',
+    defaultValue: 'http://192.168.31.34:8000',
   );
 
   /// SSE endpoint 路径
