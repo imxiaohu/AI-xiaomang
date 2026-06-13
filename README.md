@@ -573,6 +573,6 @@ AIVideo/
 
 **⭐ 如果这个项目对你有帮助，欢迎 Star！**
 
-Made with ❤️ by AI 小芒 Team
+Made with ❤️ by Xiaohu 
 
 </div>
