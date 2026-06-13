@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' as io;
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import '../config/env_config.dart';
@@ -61,6 +62,8 @@ class TripoStatusResponse {
   final String? taskType;
   final String? submitTime;
   final String? endTime;
+  final String? errorMessage;
+  final bool canCancel;
 
   const TripoStatusResponse({
     required this.code,
@@ -72,6 +75,8 @@ class TripoStatusResponse {
     this.taskType,
     this.submitTime,
     this.endTime,
+    this.errorMessage,
+    this.canCancel = false,
   });
 }
 
@@ -95,6 +100,10 @@ class TripoService {
   /// 当前活跃任务ID
   String? _activeTaskId;
   String? get activeTaskId => _activeTaskId;
+
+  /// 最近一次 /status 响应里的 can_cancel（owner 可取消时为 true）
+  bool _canCancel = false;
+  bool get canCancel => _canCancel;
 
   /// 是否在生成中
   bool get isGenerating => _pollTimer != null && _activeTaskId != null;
@@ -260,7 +269,29 @@ class TripoService {
       taskType: data['task_type'] as String?,
       submitTime: data['submit_time'] as String?,
       endTime: data['end_time'] as String?,
+      errorMessage: data['error_message'] as String?,
+      canCancel: data['can_cancel'] as bool? ?? false,
     );
+  }
+
+  /// 取消正在生成的任务（软删除）。
+  /// 后端立即响应，后台轮询协程会在下一轮检查 cancel_requested 后退出。
+  Future<bool> cancelTask(String taskId) async {
+    final resp = await _client!.post(
+      Uri.parse('$_baseUri/tripo/cancel/$taskId'),
+      headers: {
+        if (token.isNotEmpty) 'X-User-Token': token,
+      },
+    );
+    if (resp.statusCode == 200) {
+      cancelPolling();
+      return true;
+    }
+    if (resp.statusCode == 409) {
+      cancelPolling();
+      return true;
+    }
+    throw Exception('Cancel failed (${resp.statusCode}): ${resp.body}');
   }
 
   TripoTaskStatus _parseStatus(String s) {
@@ -297,8 +328,10 @@ class TripoService {
           taskType: status.taskType,
           submitTime: status.submitTime,
           endTime: status.endTime,
+          errorMessage: status.errorMessage,
         );
-        onProgress?.call(status.taskStatus, null);
+        _canCancel = status.canCancel;
+        onProgress?.call(status.taskStatus, status.errorMessage);
 
         if (status.taskStatus == TripoTaskStatus.succeeded ||
             status.taskStatus == TripoTaskStatus.failed ||
@@ -318,6 +351,31 @@ class TripoService {
     _pollTimer?.cancel();
     _pollTimer = null;
     _activeTaskId = null;
+  }
+
+  /// 下载 GLB 到本地（流式写文件，避免一次性把 50-200MB 加载到内存）。
+  /// 返回写入的字节数。
+  Future<int> downloadGlbToFile(String taskId, String savePath) async {
+    final req = http.Request('GET', Uri.parse(glbUrl(taskId)));
+    if (token.isNotEmpty) {
+      req.headers['X-User-Token'] = token;
+    }
+    final resp = await _client!.send(req);
+    if (resp.statusCode != 200) {
+      throw Exception('GLB download failed: ${resp.statusCode}');
+    }
+    final file = await io.File(savePath).create(recursive: true);
+    final sink = file.openWrite();
+    var total = 0;
+    try {
+      await for (final chunk in resp.stream) {
+        sink.add(chunk);
+        total += chunk.length;
+      }
+    } finally {
+      await sink.close();
+    }
+    return total;
   }
 
   /// 获取本地GLB文件的URL

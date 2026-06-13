@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 import 'package:camera/camera.dart';
 import '../providers/app_state.dart';
@@ -23,6 +24,7 @@ class VisualChatScreen extends StatefulWidget {
 class _VisualChatScreenState extends State<VisualChatScreen>
     with WidgetsBindingObserver {
   StreamSubscription<String>? _infoSub;
+  bool _isDownloadingGlb = false;
 
   @override
   void initState() {
@@ -128,12 +130,17 @@ class _VisualChatScreenState extends State<VisualChatScreen>
                     previewImageUrl: _tripoPreviewUrl(appState),
                     isGenerating: appState.tripoGenerating,
                     progress: appState.tripoGenerating ? appState.tripoProgress : null,
-                    statusText: appState.tripoGenerating ? appState.tripoStatusText : null,
+                    statusText: appState.tripoStatusText,
                     aiStatus: appState.aiStatus,
                     runMode: appState.runMode,
                     omniMode: appState.omniMode,
                     ttsVolume: appState.ttsVolume,
                     hardwareInfo: appState.hardwareInfo,
+                    // 新增：取消 / 取消权限 / 保存 GLB
+                    onCancel: appState.cancelTripoGeneration,
+                    canCancel: appState.tripoCanCancel,
+                    isDownloading: _isDownloadingGlb,
+                    onDownloadGlb: _isDownloadingGlb ? null : _downloadGlbToLocal,
                   ),
                 ),
               ),
@@ -438,9 +445,41 @@ class _VisualChatScreenState extends State<VisualChatScreen>
   }
 
   String? _tripoPreviewUrl(AppState appState) {
-    final tid = appState.tripoTaskId;
-    if (tid == null) return null;
+    // 修 bug #2：市场选用后 tripoTaskId 为 null，此时 activePreviewUrl
+    // 仍能从 _activeMarketplaceItem.previewUrl 解析出预览图。
+    if (appState.activePreviewUrl == null) return null;
     return appState.activePreviewUrl;
+  }
+
+  /// 下载当前 3D 模型的 GLB 到本地（Documents/）
+  Future<String?> _downloadGlbToLocal() async {
+    final appState = context.read<AppState>();
+    final tid = appState.tripoTaskId ?? appState.activeMarketplaceItem?.taskId;
+    final svc = appState.tripoService;
+    if (tid == null || svc == null) {
+      _toast('当前没有可保存的 3D 模型');
+      return null;
+    }
+    setState(() => _isDownloadingGlb = true);
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final path = '${dir.path}/model_$tid.glb';
+      final bytes = await svc.downloadGlbToFile(tid, path);
+      debugPrint('[VisualChat] saved GLB ${bytes}B to $path');
+      return path;
+    } catch (e) {
+      _toast('保存失败：$e');
+      return null;
+    } finally {
+      if (mounted) setState(() => _isDownloadingGlb = false);
+    }
+  }
+
+  void _toast(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg), duration: const Duration(seconds: 3)),
+    );
   }
 }
 

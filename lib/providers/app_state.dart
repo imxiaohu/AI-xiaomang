@@ -216,6 +216,8 @@ class AppState extends ChangeNotifier {
   double _tripoProgress = 0.0;
   String _tripoStatusText = '';
   String? _tripoError;
+  bool _tripoCanCancel = false;
+  DateTime? _tripoRunStart;
 
   String? get tripoTaskId => _tripoTaskId;
   String? get tripoModelUrl => _tripoModelUrl;
@@ -224,6 +226,7 @@ class AppState extends ChangeNotifier {
   double get tripoProgress => _tripoProgress;
   String get tripoStatusText => _tripoStatusText;
   String? get tripoError => _tripoError;
+  bool get tripoCanCancel => _tripoCanCancel;
 
   // ==============================
   // 3D 形象市场
@@ -973,51 +976,99 @@ class AppState extends ChangeNotifier {
 
   void _initTripo() {
     _tripoService = TripoService(baseUrl: backendBaseUrl);
-    _tripoService!.onProgress = (status, _) {
-      _tripoGenerating = true;
+    _tripoService!.onProgress = (status, errorMessage) {
       switch (status) {
         case TripoTaskStatus.pending:
-          _tripoStatusText = '任务已提交，等待处理…';
+          _tripoGenerating = true;
+          _tripoStatusText = '排队中…';
           _tripoProgress = 0.1;
+          _tripoRunStart = DateTime.now();
           break;
         case TripoTaskStatus.running:
-          _tripoStatusText = 'AI 正在生成 3D 模型…';
+          _tripoGenerating = true;
+          _tripoStatusText = _runningPhaseText();
           _tripoProgress = 0.4;
           break;
         case TripoTaskStatus.succeeded:
+          _tripoGenerating = false;
           _tripoStatusText = '3D 模型生成成功！';
           _tripoProgress = 1.0;
-          _tripoGenerating = false;
           _tripoModelUrl = _tripoService!.lastResult?.pbrModelUrl;
           _tripoPreviewUrl = _tripoService!.lastResult?.renderedImageUrl;
           _tripoError = null;
-          // 异步刷新"我的模型" + 提示用户
           // ignore: discarded_futures
           loadMyModels(refresh: false);
-          emitInfo('已保存到形象市场（${_visibilityZh(_settings.defaultModelVisibility)}）');
+          final warning = _tripoService!.lastResult?.errorMessage;
+          if (warning != null && warning.isNotEmpty) {
+            emitInfo('生成成功，但有警告：$warning');
+          } else {
+            emitInfo('已保存到形象市场（${_visibilityZh(_settings.defaultModelVisibility)}）');
+          }
+          _tripoRunStart = null;
           break;
         case TripoTaskStatus.failed:
-          _tripoStatusText = '生成失败，请重试';
           _tripoGenerating = false;
-          _tripoError = _tripoService!.lastResult?.errorMessage;
+          _tripoError = errorMessage ?? _tripoService!.lastResult?.errorMessage;
+          _tripoStatusText = _tripoError != null && _tripoError!.isNotEmpty
+              ? '生成失败：$_tripoError'
+              : '生成失败，请重试';
+          _tripoProgress = 0.0;
+          _tripoRunStart = null;
           break;
         case TripoTaskStatus.canceled:
-          _tripoStatusText = '任务已取消';
           _tripoGenerating = false;
-          _tripoError = '任务已取消';
+          _tripoStatusText = '已取消';
+          _tripoError = null;
+          _tripoProgress = 0.0;
+          _tripoRunStart = null;
           break;
         case TripoTaskStatus.unknown:
+          _tripoGenerating = true;
           _tripoStatusText = '等待服务器响应…';
+          _tripoProgress = 0.05;
           break;
       }
+      _tripoCanCancel = _tripoService!.canCancel;
       notifyListeners();
     };
     _tripoService!.onError = (error) {
       _tripoGenerating = false;
       _tripoError = error;
       _tripoStatusText = '网络错误：$error';
+      _tripoProgress = 0.0;
+      _tripoRunStart = null;
       notifyListeners();
     };
+  }
+
+  /// 阶段化文案：RUNNING 状态根据已等待时间切换 3 段文案
+  String _runningPhaseText() {
+    final start = _tripoRunStart;
+    if (start == null) return 'AI 正在雕琢几何…';
+    final elapsed = DateTime.now().difference(start).inSeconds;
+    if (elapsed < 30) return 'AI 正在雕琢几何…';
+    if (elapsed < 90) return '正在烘焙贴图…';
+    return '正在精修细节…';
+  }
+
+  /// 取消正在生成的任务
+  Future<void> cancelTripoGeneration() async {
+    final tid = _tripoTaskId;
+    if (tid == null || _tripoService == null) return;
+    try {
+      await _tripoService!.cancelTask(tid);
+    } catch (e) {
+      emitInfo('取消请求失败：$e');
+      return;
+    }
+    _tripoGenerating = false;
+    _tripoStatusText = '已取消';
+    _tripoError = null;
+    _tripoProgress = 0.0;
+    _tripoCanCancel = false;
+    _tripoRunStart = null;
+    notifyListeners();
+    emitInfo('已取消 3D 生成');
   }
 
   String _visibilityZh(String v) {
@@ -1044,6 +1095,8 @@ class AppState extends ChangeNotifier {
       _tripoProgress = 0.05;
       _tripoError = null;
       _tripoModelId = null;
+      _tripoCanCancel = false;
+      _tripoRunStart = null;
       notifyListeners();
 
       final data = await _tripoService!.textTo3DRaw(
@@ -1072,6 +1125,8 @@ class AppState extends ChangeNotifier {
       _tripoProgress = 0.05;
       _tripoError = null;
       _tripoModelId = null;
+      _tripoCanCancel = false;
+      _tripoRunStart = null;
       notifyListeners();
 
       final data = await _tripoService!.imageTo3DRaw(
@@ -1100,6 +1155,8 @@ class AppState extends ChangeNotifier {
       _tripoProgress = 0.05;
       _tripoError = null;
       _tripoModelId = null;
+      _tripoCanCancel = false;
+      _tripoRunStart = null;
       notifyListeners();
 
       // encodedInput 格式: "url1|null|url3|null" (用|分隔，null=禁用/空)
@@ -1149,6 +1206,8 @@ class AppState extends ChangeNotifier {
     _tripoProgress = 0.0;
     _tripoStatusText = '';
     _tripoError = null;
+    _tripoCanCancel = false;
+    _tripoRunStart = null;
     _tripoService?.cancelPolling();
     notifyListeners();
   }
@@ -1380,35 +1439,72 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 获取当前活跃 GLB 的完整 URL（优先本地路径，后端下载完成后返回本地路径）
+  /// 暴露 TripoService 给 UI（用于下载 GLB 到本地等场景）
+  TripoService? get tripoService => _tripoService;
+
+  /// 把模型 URL 转成带 scheme 的绝对地址。
+  /// - 已带 http/https 原样返回
+  /// - 相对路径补上 backendBaseUrl
+  /// - 拼接后给 model_viewer_plus iOS 端使用（修 bug #1）
+  static String? resolveModelUrl(String? url, String backendBaseUrl) {
+    if (url == null || url.isEmpty) return null;
+    if (url.startsWith('http://') || url.startsWith('https://')) return url;
+    return '$backendBaseUrl$url';
+  }
+
+  /// 获取当前活跃 GLB 的完整 URL。
+  ///
+  /// 三段优先级（修 bug #2：市场选用后仍是球）：
+  /// 1) 形象市场选用（_activeMarketplaceItem.glbUrl）— 跨重启保留的"当前形象"
+  /// 2) 刚生成的任务（_tripoService.lastResult.pbrModelUrl 或本地路径兜底）
+  /// 3) null
+  ///
+  /// 后端 /status 已返回带 scheme 的绝对地址；如果拿到的是相对路径则补上 base。
   String? get activeGlbUrl {
+    final mpUrl = _activeMarketplaceItem?.glbUrl;
+    if (mpUrl != null && mpUrl.isNotEmpty) {
+      return resolveModelUrl(mpUrl, backendBaseUrl);
+    }
     final tid = _tripoTaskId;
     if (tid == null || _tripoService == null) return null;
-    // lastResult.pbrModelUrl 来自后端 /status 接口，后端已做本地/远程降级
-    return _tripoService!.lastResult?.pbrModelUrl ??
-        '$backendBaseUrl/tripo/model/$tid/glb';
+    final last = _tripoService!.lastResult;
+    if (last?.pbrModelUrl != null && last!.pbrModelUrl!.isNotEmpty) {
+      return resolveModelUrl(last.pbrModelUrl, backendBaseUrl);
+    }
+    return resolveModelUrl('/tripo/model/$tid/glb', backendBaseUrl);
   }
 
-  /// 获取当前活跃预览图的完整 URL
-  /// 优先用后端 /status 接口降级后的 URL（本地未就绪时返回远程 rendered_image_url），
-  /// 兜底用本地路径（后端下载完成后可通过此路径访问）
+  /// 获取当前活跃预览图的完整 URL。
+  /// 优先级同 activeGlbUrl。
   String? get activePreviewUrl {
+    final mpUrl = _activeMarketplaceItem?.previewUrl;
+    if (mpUrl != null && mpUrl.isNotEmpty) {
+      return resolveModelUrl(mpUrl, backendBaseUrl);
+    }
     final tid = _tripoTaskId;
     if (tid == null || _tripoService == null) return null;
-    // lastResult.renderedImageUrl 来自后端 /status 接口，已做本地/远程降级
-    return _tripoService!.lastResult?.renderedImageUrl ??
-        _tripoService!.previewUrl(tid);
+    final last = _tripoService!.lastResult;
+    if (last?.renderedImageUrl != null && last!.renderedImageUrl!.isNotEmpty) {
+      return resolveModelUrl(last.renderedImageUrl, backendBaseUrl);
+    }
+    return resolveModelUrl('/tripo/model/$tid/preview', backendBaseUrl);
   }
 
-  /// 当前模型是否生成成功
-  bool get tripoSucceeded =>
-      _tripoTaskId != null &&
-      _tripoService?.lastResult?.status == TripoTaskStatus.succeeded;
+  /// 当前模型是否"应该展示 3D 模型"（任一来源就绪）
+  /// 修 bug #2：市场选用后也应为 true
+  bool get tripoSucceeded {
+    if (_activeMarketplaceItem?.glbUrl != null &&
+        _activeMarketplaceItem!.glbUrl!.isNotEmpty) {
+      return true;
+    }
+    return _tripoTaskId != null &&
+        _tripoService?.lastResult?.status == TripoTaskStatus.succeeded;
+  }
 
-  /// 当前模型 GLB URL（远程或本地）
+  /// 当前模型 GLB URL（远程或本地）— 仅"刚生成"分支
   String? get tripoPbrUrl => _tripoService?.lastResult?.pbrModelUrl;
 
-  /// 当前渲染预览图 URL
+  /// 当前渲染预览图 URL — 仅"刚生成"分支
   String? get tripoRenderedUrl => _tripoService?.lastResult?.renderedImageUrl;
 
   @override

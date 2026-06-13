@@ -1,12 +1,16 @@
 """Tripo 3D模型生成路由 + 3D 形象市场"""
+import asyncio
+import logging
 import httpx
 from pathlib import Path
 from typing import Optional
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends, Header, Query
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends, Header, Query, Request
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from config import DASHSCOPE_API_KEY
 from services import marketplace_db
+
+logger = logging.getLogger("tripo_3d")
 
 router = APIRouter(prefix="/tripo", tags=["tripo"])
 
@@ -62,10 +66,19 @@ class StatusResponse(BaseModel):
     end_time: str | None = None
     model_id: str | None = None  # 新增
     visibility: str | None = None  # 新增
+    error_message: str | None = None  # 新增：失败原因透传
+    can_cancel: bool = False  # 新增：仅 PENDING/RUNNING 且 owner 匹配时为 true
 
 
 class VisibilityPatch(BaseModel):
     visibility: str = Field(..., pattern="^(public|unlisted|private)$")
+
+
+class CancelResponse(BaseModel):
+    code: int
+    task_id: str
+    task_status: str  # CANCELED
+    message: str = "任务已取消"
 
 
 class MarketUpdate(BaseModel):
@@ -100,6 +113,24 @@ async def _fetch_url_to_bytes(url: str) -> bytes:
         return resp.content
 
 
+def _absolute_url(request: Optional[Request], path_or_url: Optional[str]) -> Optional[str]:
+    """把相对路径（如 /tripo/model/.../glb）转成带 scheme 的绝对地址。
+
+    - 已带 scheme（http/https）原样返回
+    - 相对路径时拼上 request 的 scheme + host（修 bug #1：iOS model_viewer_plus 拒绝相对 URL）
+    - request 为 None 时降级返回原值（极少数代码路径下用于纯 DB 渲染）
+    """
+    if not path_or_url:
+        return path_or_url
+    if path_or_url.startswith(("http://", "https://")):
+        return path_or_url
+    if request is None:
+        return path_or_url
+    scheme = request.url.scheme
+    host = request.headers.get("host") or request.url.netloc
+    return f"{scheme}://{host}{path_or_url}"
+
+
 async def _download_and_cache(url: str, task_id: str, filename: str) -> Path:
     """下载 GLB/图片 文件到本地缓存"""
     local_path = MODELS_DIR / f"{task_id}_{filename}"
@@ -121,7 +152,11 @@ def _delete_model_files(task_id: str) -> None:
 
 
 async def _poll_and_cache(task_id: str):
-    """后台任务：轮询任务状态，SUCCEEDED后下载GLB + 写回 DB"""
+    """后台任务：轮询任务状态，SUCCEEDED后下载GLB + 写回 DB
+
+    支持取消：每轮轮询前检查 _task_registry[task_id]["cancel_requested"]，
+    若用户已请求取消则直接退出下载循环（资源不浪费）。
+    """
     from services.aliyun_tripo import AliyunTripo
 
     tripo = AliyunTripo()
@@ -133,15 +168,53 @@ async def _poll_and_cache(task_id: str):
         marketplace_db.mark_failed(task_id, "DASHSCOPE_API_KEY not configured")
         return
 
-    # 标记 RUNNING
-    _task_registry[task_id] = {"status": "RUNNING"}
+    # 标记 RUNNING（保留 cancel_requested 标记）
+    existing = _task_registry.get(task_id) or {}
+    _task_registry[task_id] = {**existing, "status": "RUNNING"}
     marketplace_db.mark_running(task_id)
 
-    result = await tripo.wait_for_completion(task_id, poll_interval=15.0, max_wait=600.0)
+    # 取消感知轮询：每 15s 检查一次，但用户取消后立即退出
+    elapsed = 0.0
+    poll_interval = 15.0
+    max_wait = 600.0
+    result = None
+    while elapsed < max_wait:
+        # 用户取消：立即退出循环，不下载
+        if _task_registry.get(task_id, {}).get("cancel_requested"):
+            logger.info(f"[Tripo] task {task_id} cancel requested, aborting poll loop")
+            return
+        try:
+            result = await tripo.get_task_result(task_id)
+        except Exception as e:
+            logger.warning(f"[Tripo] get_task_result error for {task_id}: {e}")
+            await asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+            continue
+        if result.task_status in ("SUCCEEDED", "FAILED", "CANCELED"):
+            break
+        await asyncio.sleep(poll_interval)
+        elapsed += poll_interval
+
+    if result is None:
+        # 超时或多次失败：标记 FAILED
+        _task_registry[task_id] = {
+            **(existing or {}),
+            "status": "FAILED",
+            "error": "轮询超时或多次失败",
+        }
+        marketplace_db.mark_failed(task_id, "轮询超时或多次失败")
+        return
+
+    if _task_registry.get(task_id, {}).get("cancel_requested"):
+        # 用户在最后一刻取消：尊重用户意图
+        logger.info(f"[Tripo] task {task_id} cancel requested after final poll")
+        return
+
     if result.task_status == "SUCCEEDED":
         pbr_path = None
         base_path = None
         rendered_path = None
+        download_errors: list[str] = []
 
         if result.results:
             first = result.results[0]
@@ -152,7 +225,9 @@ async def _poll_and_cache(task_id: str):
                         first.pbr_model_url, task_id, "model.glb"
                     )
                 except Exception as e:
-                    print(f"[Tripo] Failed to download GLB: {e}")
+                    msg = f"GLB 下载失败: {e}"
+                    logger.warning(f"[Tripo] {task_id} {msg}")
+                    download_errors.append(msg)
 
             if first.base_model_url:
                 try:
@@ -160,7 +235,9 @@ async def _poll_and_cache(task_id: str):
                         first.base_model_url, task_id, "model_base.glb"
                     )
                 except Exception as e:
-                    print(f"[Tripo] Failed to download base GLB: {e}")
+                    msg = f"base GLB 下载失败: {e}"
+                    logger.warning(f"[Tripo] {task_id} {msg}")
+                    download_errors.append(msg)
 
             if first.rendered_image_url:
                 try:
@@ -168,9 +245,22 @@ async def _poll_and_cache(task_id: str):
                         first.rendered_image_url, task_id, "preview.webp"
                     )
                 except Exception as e:
-                    print(f"[Tripo] Failed to download preview: {e}")
+                    msg = f"预览图下载失败: {e}"
+                    logger.warning(f"[Tripo] {task_id} {msg}")
+                    download_errors.append(msg)
 
         task_type = result.usage.task_type if result.usage else None
+
+        # 若核心文件（GLB）下载失败，整体判为 FAILED；仅预览图失败时仍 SUCCEEDED
+        if not pbr_path and result.results and result.results[0].pbr_model_url:
+            error_msg = "; ".join(download_errors) or "GLB 文件下载失败"
+            _task_registry[task_id] = {
+                **(existing or {}),
+                "status": "FAILED",
+                "error": error_msg,
+            }
+            marketplace_db.mark_failed(task_id, error_msg)
+            return
 
         _task_registry[task_id] = {
             "status": "SUCCEEDED",
@@ -183,6 +273,7 @@ async def _poll_and_cache(task_id: str):
             "local_preview": str(rendered_path) if rendered_path else None,
             "submit_time": result.submit_time,
             "end_time": result.end_time,
+            "warning": "; ".join(download_errors) if download_errors else None,
         }
 
         marketplace_db.mark_succeeded(
@@ -196,12 +287,14 @@ async def _poll_and_cache(task_id: str):
         )
     elif result.task_status == "FAILED":
         _task_registry[task_id] = {
+            **(existing or {}),
             "status": "FAILED",
             "error": result.error_message,
         }
         marketplace_db.mark_failed(task_id, result.error_message)
     elif result.task_status == "CANCELED":
         _task_registry[task_id] = {
+            **(existing or {}),
             "status": "CANCELED",
             "error": "任务已取消",
         }
@@ -355,6 +448,7 @@ async def multi_image_to_3d(
 @router.get("/status/{task_id}", response_model=StatusResponse)
 async def get_status(
     task_id: str,
+    request: Request,
     owner_id: str = Depends(_require_user),
 ):
     """查询任务状态和结果
@@ -363,6 +457,7 @@ async def get_status(
     - 本地未下载完则降级为远程 URL
     - FAILED/CANCELED 返回错误信息
     - 私有模型仅 owner 可查
+    - **URL 一律返回绝对地址**（修 bug #1：iOS model_viewer_plus 不接受相对 URL）
     """
     # 1) 先在 DB 中查（marketplace 主存）
     db_row = marketplace_db.get_by_task_id(task_id)
@@ -384,11 +479,12 @@ async def get_status(
                 task_id=task_id,
                 task_status=result.task_status,
                 task_type=result.usage.task_type if result.usage else None,
-                pbr_model_url=result.results[0].pbr_model_url if result.results else None,
-                base_model_url=result.results[0].base_model_url if result.results else None,
-                rendered_image_url=result.results[0].rendered_image_url if result.results else None,
+                pbr_model_url=_absolute_url(request, result.results[0].pbr_model_url) if result.results else None,
+                base_model_url=_absolute_url(request, result.results[0].base_model_url) if result.results else None,
+                rendered_image_url=_absolute_url(request, result.results[0].rendered_image_url) if result.results else None,
                 submit_time=result.submit_time,
                 end_time=result.end_time,
+                can_cancel=False,
             )
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
@@ -407,7 +503,7 @@ async def get_status(
         info = {
             "status": db_row.status,
             "task_type": db_row.task_type,
-            "pbr_model_url": None,  # 远程 URL 已在 _task_registry 丢失；走本地
+            "pbr_model_url": None,
             "base_model_url": None,
             "rendered_image_url": None,
             "local_glb": db_row.glb_path,
@@ -419,23 +515,29 @@ async def get_status(
             "visibility": db_row.visibility,
         }
 
-    # 私有模型访问控制
     if db_row is not None and db_row.visibility == "private" and db_row.owner_id != owner_id:
         raise HTTPException(status_code=403, detail="该模型为私有")
 
-    # GLB URL 降级策略：本地优先，远程兜底
+    # GLB URL 降级策略：本地优先，远程兜底 → 转绝对地址
     local_glb = info.get("local_glb")
     if local_glb and Path(local_glb).exists():
-        glb_url = f"/tripo/model/{task_id}/glb"
+        glb_url = _absolute_url(request, f"/tripo/model/{task_id}/glb")
     else:
-        glb_url = info.get("pbr_model_url")
+        glb_url = _absolute_url(request, info.get("pbr_model_url"))
 
     # 预览图
     local_preview = info.get("local_preview")
     if local_preview and Path(local_preview).exists():
-        preview_url = f"/tripo/model/{task_id}/preview"
+        preview_url = _absolute_url(request, f"/tripo/model/{task_id}/preview")
     else:
-        preview_url = info.get("rendered_image_url")
+        preview_url = _absolute_url(request, info.get("rendered_image_url"))
+
+    # can_cancel: 仅 PENDING/RUNNING 且 owner 匹配
+    can_cancel = (
+        in_memory is not None
+        and info.get("status") in ("PENDING", "RUNNING")
+        and (db_row is None or db_row.owner_id == owner_id)
+    )
 
     return StatusResponse(
         code=0,
@@ -443,12 +545,14 @@ async def get_status(
         task_status=info.get("status", "UNKNOWN"),
         task_type=info.get("task_type"),
         pbr_model_url=glb_url,
-        base_model_url=info.get("base_model_url"),
+        base_model_url=_absolute_url(request, info.get("base_model_url")),
         rendered_image_url=preview_url,
         submit_time=info.get("submit_time"),
         end_time=info.get("end_time"),
         model_id=info.get("model_id"),
         visibility=info.get("visibility"),
+        error_message=info.get("error") or info.get("warning"),
+        can_cancel=can_cancel,
     )
 
 
@@ -517,23 +621,157 @@ async def download_glb_base(task_id: str, owner_id: str = Depends(_require_user)
     )
 
 
-@router.get("/model/{task_id}/preview")
-async def download_preview(task_id: str, owner_id: str = Depends(_require_user)):
-    """下载渲染预览图"""
+@router.post("/cancel/{task_id}", response_model=CancelResponse)
+async def cancel_task(task_id: str, owner_id: str = Depends(_require_user)):
+    """取消正在运行的 Tripo 任务（软删除，不入市场，不扣成功配额）
+
+    - 仅 PENDING/RUNNING 状态可取消
+    - 后台轮询协程会在下一轮检查到 cancel_requested 后立即退出下载循环
+    - 已在市场（DB）中的记录会标记为 CANCELED，但不会删除文件
+    """
     in_mem = _task_registry.get(task_id)
-    if in_mem is None and marketplace_db.get_by_task_id(task_id) is None:
+    db_row = marketplace_db.get_by_task_id(task_id)
+
+    if in_mem is None and db_row is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    if db_row is not None and db_row.owner_id != owner_id:
+        raise HTTPException(status_code=403, detail="非任务所有者，无权取消")
+
+    current_status = (in_mem or {}).get("status") or (db_row.status if db_row else None)
+    if current_status not in ("PENDING", "RUNNING"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"任务当前状态 {current_status} 不可取消",
+        )
+
+    existing = in_mem or {}
+    _task_registry[task_id] = {
+        **existing,
+        "cancel_requested": True,
+    }
+    logger.info(f"[Tripo] task {task_id} cancel requested by {owner_id}")
+
+    return CancelResponse(
+        code=0,
+        task_id=task_id,
+        task_status="CANCELED",
+        message="取消请求已提交，1秒内生效",
+    )
+
+
+@router.get("/model/{task_id}/glb_lazy")
+async def download_glb_lazy(task_id: str, owner_id: str = Depends(_require_user)):
+    """懒下载 GLB：本地有走本地；本地无则从远程流式回传（不落盘）
+
+    避免一次性把 50-200MB GLB 加载到内存或磁盘。仅用于"看一眼"场景。
+    真正"保存到本地相册"请走 /model/{task_id}/glb（强制落盘）。
+    """
+    in_mem = _task_registry.get(task_id)
+    db_row = marketplace_db.get_by_task_id(task_id)
+    if in_mem is None and db_row is None:
         raise HTTPException(status_code=404, detail="任务不存在")
 
     _enforce_file_visibility(task_id, owner_id)
 
-    local_path = (in_mem or {}).get("local_preview") or (
-        marketplace_db.get_by_task_id(task_id).preview_path
-        if marketplace_db.get_by_task_id(task_id) else None
+    local_path = (in_mem or {}).get("local_glb") or (
+        db_row.glb_path if db_row else None
     )
-    if not local_path or not Path(local_path).exists():
+    if local_path and Path(local_path).exists():
+        return FileResponse(
+            local_path,
+            media_type="model/gltf-binary",
+            filename=f"{task_id}.glb",
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+
+    remote_url = (in_mem or {}).get("pbr_model_url")
+    status_ok = (in_mem or {}).get("status") == "SUCCEEDED" or (
+        db_row is not None and db_row.status == "SUCCEEDED"
+    )
+    if not remote_url or not status_ok:
+        raise HTTPException(status_code=404, detail="GLB 尚未就绪")
+
+    async def _stream():
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
+            async with client.stream("GET", remote_url) as resp:
+                resp.raise_for_status()
+                async for chunk in resp.aiter_bytes(chunk_size=256 * 1024):
+                    yield chunk
+
+    return StreamingResponse(
+        _stream(),
+        media_type="model/gltf-binary",
+        headers={
+            "Content-Disposition": f'inline; filename="{task_id}.glb"',
+            "Cache-Control": "public, max-age=3600",
+        },
+    )
+
+
+@router.get("/model/{task_id}/preview")
+async def download_preview(task_id: str, owner_id: str = Depends(_require_user)):
+    """下载渲染预览图
+
+    三段降级：
+    1) 本地缓存命中 → 直接 FileResponse
+    2) 任务 SUCCEEDED 但本地未就绪 → 代理远程 URL（流式回传），
+       同时后台异步落盘到 models_cache/，下次直接命中本地
+    3) 都失败 → 404
+    """
+    in_mem = _task_registry.get(task_id)
+    db_row = marketplace_db.get_by_task_id(task_id)
+    if in_mem is None and db_row is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    _enforce_file_visibility(task_id, owner_id)
+
+    # 1) 本地优先
+    local_path = (in_mem or {}).get("local_preview") or (
+        db_row.preview_path if db_row else None
+    )
+    if local_path and Path(local_path).exists():
+        return FileResponse(
+            local_path,
+            media_type="image/webp",
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+
+    # 2) 远程代理：必须 SUCCEEDED 且有 remote URL
+    remote_url = (in_mem or {}).get("rendered_image_url")
+    if not remote_url and in_mem is None and db_row is not None:
         raise HTTPException(status_code=404, detail="预览图尚未生成")
 
-    return FileResponse(local_path, media_type="image/webp")
+    status_ok = (in_mem or {}).get("status") == "SUCCEEDED" or (
+        db_row is not None and db_row.status == "SUCCEEDED"
+    )
+    if not remote_url or not status_ok:
+        raise HTTPException(status_code=404, detail="预览图尚未生成")
+
+    # 后台异步落盘（best-effort，不阻塞响应）
+    asyncio.create_task(_cache_remote_preview(task_id, remote_url))
+
+    async def _stream():
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
+            async with client.stream("GET", remote_url) as resp:
+                resp.raise_for_status()
+                async for chunk in resp.aiter_bytes(chunk_size=64 * 1024):
+                    yield chunk
+
+    return StreamingResponse(
+        _stream(),
+        media_type="image/webp",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
+async def _cache_remote_preview(task_id: str, remote_url: str) -> None:
+    """后台把远程预览图下载到本地（best-effort，失败不报错）"""
+    try:
+        await _download_and_cache(remote_url, task_id, "preview.webp")
+        logger.info(f"[Tripo] {task_id} preview cached to disk (lazy)")
+    except Exception as e:
+        logger.warning(f"[Tripo] {task_id} lazy preview cache failed: {e}")
 
 
 # ============ 市场公开列表 / 详情 / 下载 ============
