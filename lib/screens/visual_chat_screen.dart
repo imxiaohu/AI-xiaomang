@@ -253,8 +253,10 @@ class _VisualChatScreenState extends State<VisualChatScreen>
               child: FittedBox(
                 fit: BoxFit.cover,
                 child: SizedBox(
+                  // CameraPreview 内部按 sensor 横向布局，渲染时需要 swap
+                  // 宽高以匹配设备竖屏显示比例（与 _computeCameraRenderRect 保持一致）
                   width: controller.value.previewSize?.height ?? 1,
-                  height: controller.value.previewSize?.height ?? 1,
+                  height: controller.value.previewSize?.width ?? 1,
                   child: CameraPreview(controller),
                 ),
               ),

@@ -185,7 +185,13 @@ class _TripoModelViewerState extends State<TripoModelViewer> {
   Widget _buildModelViewer() {
     return ClipRRect(
       borderRadius: BorderRadius.circular(12),
+      // 修 bug：model_viewer_plus 内部 WebView 在 src 变更时不会自动 reload，
+      // 表现：选用市场新模型后，主页 3D 区域还是显示旧模型；冷启动后正常。
+      // 根因：ModelViewer subtree 在 widget rebuild 时 key 不变，Flutter 不销毁 WebView，
+      // <model-viewer> 元素的 src 属性虽然更新了，但 model-viewer.js 不重置内部 GLB 加载。
+      // 修复：用 ValueKey 绑定 modelUrl，URL 变时强制 Flutter 销毁旧 WebView、建新的。
       child: ModelViewer(
+        key: ValueKey('model_viewer_${widget.modelUrl}'),
         // 修 bug #1：必须是带 scheme 的绝对 URL
         src: widget.modelUrl!,
         alt: 'Tripo 3D Model',

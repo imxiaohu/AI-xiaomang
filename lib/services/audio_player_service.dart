@@ -1,36 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_soloud/flutter_soloud.dart';
 
 class AudioPlayerService {
   static const int _sampleRate = 24000;
-
-  // debug ingest (session deae74) — append NDJSON to local file
-  static const String _dbgPath = '/Users/xiaohu/Downloads/AIVideo/.cursor/debug-deae74.log';
-  static const String _dbgSession = 'deae74';
-  void _dbg(String location, String message, Map<String, dynamic> data, {String hypothesisId = 'H?'}) {
-    // #region agent log
-    try {
-      // ignore: avoid_print
-      print('[AudioDbg] $location $message $data');
-      final obj = {
-        'sessionId': _dbgSession,
-        'id': 'log_${DateTime.now().millisecondsSinceEpoch}_audio',
-        'timestamp': DateTime.now().millisecondsSinceEpoch,
-        'location': location,
-        'message': message,
-        'data': data,
-        'runId': 'pre-fix',
-        'hypothesisId': hypothesisId,
-      };
-      final f = File(_dbgPath);
-      f.parent.createSync(recursive: true);
-      f.writeAsStringSync('${jsonEncode(obj)}\n', mode: FileMode.append, flush: false);
-    } catch (_) {}
-    // #endregion
-  }
 
   final SoLoud _soloud = SoLoud.instance;
   AudioSource? _streamHandle;
@@ -71,13 +45,6 @@ class AudioPlayerService {
   double get currentVolume => _currentVolume;
 
   Future<void> startNewTurn() async {
-    // #region agent log
-    _dbg('audio_player_service.dart:startNewTurn', 'startNewTurn_called', {
-      'chunkCount_was': _chunkCount,
-      'old_ended': _ended,
-      'streamHandle_was_alive': _streamHandle != null,
-    }, hypothesisId: 'H3');
-    // #endregion
     _ended = false;
     _playing = false;
     _chunkCount = 0;
@@ -119,23 +86,10 @@ class AudioPlayerService {
   }
 
   Future<void> flushPending() async {
-    // #region agent log
-    _dbg('audio_player_service.dart:flushPending', 'flushPending_called', {
-      'chunkCount': _chunkCount,
-      'ended_before': _ended,
-      'streamHandle_alive': _streamHandle != null,
-    }, hypothesisId: 'H3');
-    // #endregion
     _ended = true;
     if (_streamHandle != null) {
       try {
         _soloud.setDataIsEnded(_streamHandle!);
-        // #region agent log
-        _dbg('audio_player_service.dart:flushPending', 'data_ended_signaled', {
-          'chunkCount': _chunkCount,
-          'ended_now': _ended,
-        }, hypothesisId: 'H3');
-        // #endregion
         _startProgressWatcher();
       } catch (e) {
         debugPrint('[AudioPlayer] setDataIsEnded ERROR: $e');

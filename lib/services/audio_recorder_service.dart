@@ -34,6 +34,38 @@ class AudioRecorderService {
 
   bool get isRecording => _isRecording;
 
+  /// 录音是否已被用户/编排显式暂停
+  /// （底层 `_recorder` 处于 paused 状态，但 `_isRecording` 仍为 true，
+  /// 这样 `_flushChunk` 守卫会放行：暂停期间文件没有新数据，guard 在 size 校验处自然早返回，
+  /// 不会上传静默帧。）
+  bool _isPaused = false;
+  bool get isPaused => _isPaused;
+
+  /// 暂停录音（不释放资源、不关闭分片上传 timer）
+  /// VAD 模式下用于在 AI 播报 TTS 时切断 mic 输入，避免 TTS 串扰导致循环触发
+  Future<void> pauseRecording() async {
+    if (!_isRecording || _isPaused) return;
+    try {
+      await _recorder.pause();
+      _isPaused = true;
+      debugPrint('[AudioRecorder] pauseRecording() done');
+    } catch (e) {
+      debugPrint('[AudioRecorder] pauseRecording error: $e');
+    }
+  }
+
+  /// 恢复录音（与 pauseRecording 配对使用）
+  Future<void> resumeRecording() async {
+    if (!_isRecording || !_isPaused) return;
+    try {
+      await _recorder.resume();
+      _isPaused = false;
+      debugPrint('[AudioRecorder] resumeRecording() done');
+    } catch (e) {
+      debugPrint('[AudioRecorder] resumeRecording error: $e');
+    }
+  }
+
   /// 获取最近一次录制的完整 PCM 数据
   /// 供离线模式 Whisper ASR 使用
   Future<Uint8List?> getLatestPcmData() async {
@@ -92,6 +124,7 @@ class AudioRecorderService {
     print('[AudioRecorder] recorder.start() returned');
 
     _isRecording = true;
+    _isPaused = false;
     _lastReadOffset = 0;
     print('[AudioRecorder] startRecording done, file=${_pcmFile!.path}');
     onRecordingStart?.call();
@@ -155,6 +188,7 @@ class AudioRecorderService {
 
     // 标记真正结束（在最后一块已 flush 之后）
     _isRecording = false;
+    _isPaused = false;
 
     await _pcmSink?.flush();
     await _pcmSink?.close();

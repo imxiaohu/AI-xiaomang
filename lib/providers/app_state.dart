@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
@@ -22,30 +21,6 @@ import '../config/env_config.dart';
 /// 全局业务状态编排
 /// 管理：SSE连接生命周期、录音/抽帧/推理/播报时序、自动降级触发
 class AppState extends ChangeNotifier {
-  // debug ingest (session deae74) — append NDJSON to local file
-  static const String _dbgPath = '/Users/xiaohu/Downloads/AIVideo/.cursor/debug-deae74.log';
-  static const String _dbgSession = 'deae74';
-  void _dbg(String location, String message, Map<String, dynamic> data, {String hypothesisId = 'H?'}) {
-    // #region agent log
-    try {
-      // ignore: avoid_print
-      print('[AppStateDbg] $location $message $data');
-      final obj = {
-        'sessionId': _dbgSession,
-        'id': 'log_${DateTime.now().millisecondsSinceEpoch}_app',
-        'timestamp': DateTime.now().millisecondsSinceEpoch,
-        'location': location,
-        'message': message,
-        'data': data,
-        'runId': 'pre-fix',
-        'hypothesisId': hypothesisId,
-      };
-      final f = File(_dbgPath);
-      f.parent.createSync(recursive: true);
-      f.writeAsStringSync('${jsonEncode(obj)}\n', mode: FileMode.append, flush: false);
-    } catch (_) {}
-    // #endregion
-  }
 
   // ==============================
   // 运行模式
@@ -63,10 +38,22 @@ class AppState extends ChangeNotifier {
 
   Future<void> setOmniMode(OmniInteractionMode mode) async {
     if (_omniMode == mode) return;
+    final prevMode = _omniMode;
     _omniMode = mode;
     notifyListeners();
     // 通知后端切换模式
     await _sseService?.setMode(mode == OmniInteractionMode.vad ? 'vad' : 'manual');
+    // 退出 VAD 模式时，停止持续录音 + 视频抽帧 + 后台保活，否则 mic 一直开着
+    // 既耗电又把环境噪音也上传到后端
+    if (prevMode == OmniInteractionMode.vad && mode != OmniInteractionMode.vad) {
+      try {
+        await _audioRecorder?.stopRecording();
+      } catch (e) {
+        debugPrint('[AppState] setOmniMode: stopRecorder on VAD exit threw: $e');
+      }
+      _videoCapture?.stopCapture();
+      _backgroundService?.stop();
+    }
   }
 
   // ==============================
@@ -344,7 +331,29 @@ class AppState extends ChangeNotifier {
       _ttsVolume = v;
       notifyListeners();
     };
+    // 关键修复（VAD 回声死循环）：
+    // VAD 模式下，_audioRecorder 一旦 startRecording 就持续不停，mic 始终在采。
+    // AI 的 TTS 经由 SoLoud 播报出来会被 mic 二次捕获，并被原封不动上传到 Omni 的
+    // input_audio_buffer，服务端 semantic_vad 会把这段 TTS 当成"用户发言"再触发
+    // speech_started → speech_stopped → response，循环往复 AI 自言自语。
+    // 解法：AI 第一次开始播报就 pause 录音；播报完成 resume 录音。
+    // 仅在 VAD 模式下生效（manual 模式下 _audioRecorder 在用户松手时已 stop，无需处理）。
+    _audioPlayer!.onPlaybackStart = () {
+      if (_omniMode == OmniInteractionMode.vad &&
+          _audioRecorder?.isRecording == true &&
+          _audioRecorder?.isPaused == false) {
+        debugPrint('[AppState] VAD: pause recorder (AI TTS playback started)');
+        _audioRecorder!.pauseRecording();
+      }
+    };
     _audioPlayer!.onPlaybackComplete = () {
+      // 解除 pause 必须在 goIdle 之前：后者可能触发清理路径，确保唤醒 mic 监听
+      if (_omniMode == OmniInteractionMode.vad &&
+          _audioRecorder?.isRecording == true &&
+          _audioRecorder?.isPaused == true) {
+        debugPrint('[AppState] VAD: resume recorder (AI TTS playback complete)');
+        _audioRecorder!.resumeRecording();
+      }
       goIdle();
     };
 
@@ -457,12 +466,22 @@ class AppState extends ChangeNotifier {
     try {
       _cameras = await availableCameras();
       if (_cameras.isNotEmpty) {
-        _cameraController = CameraController(
-          _cameras.first,
-          ResolutionPreset.low,
-          enableAudio: false,
-        );
-        await _cameraController!.initialize();
+        // 如果 _videoCapture 已经先建好（mic 权限先于 camera 权限到位），
+        // 预览复用 _videoCapture 内部的 controller，避免多开一份。
+        // 否则才自建一份临时 preview controller（_videoCapture 后续会接管）。
+        if (_videoCapture?.controller != null && _videoCapture!.controller!.value.isInitialized) {
+          try {
+            await _cameraController?.dispose();
+          } catch (_) {}
+          _cameraController = _videoCapture!.controller;
+        } else {
+          _cameraController = CameraController(
+            _cameras.first,
+            ResolutionPreset.low,
+            enableAudio: false,
+          );
+          await _cameraController!.initialize();
+        }
         notifyListeners();
       }
     } catch (e) {
@@ -542,6 +561,18 @@ class AppState extends ChangeNotifier {
         _aiStatus = AiStatus.idle;
         _currentStreamingText = '';
         _userMessageSaved = false;
+        // 关键（VAD 闭环守卫）：如果错误发生前 mic 已被 AI 播报触发的
+        // onPlaybackStart 暂停，需要在脱离 speaking 状态时显式 resume，
+        // 否则 mic 永远停在 paused，下次用户说话服务端收不到任何 audio。
+        // 注意不能放在 goIdle() 内统一处理：manual 模式下录音是被用户手动
+        // 触发的，错误时 goIdle 路径上 _audioRecorder 可能根本没启动，调用
+        // resumeRecording() 是 no-op，但显式判断 VAD 模式更稳妥。
+        if (_omniMode == OmniInteractionMode.vad &&
+            _audioRecorder?.isRecording == true &&
+            _audioRecorder?.isPaused == true) {
+          debugPrint('[AppState] SSE error: resume recorder to recover mic');
+          _audioRecorder!.resumeRecording();
+        }
         notifyListeners();
       }
       if (e.code == 'max_reconnect') {
@@ -583,12 +614,6 @@ class AppState extends ChangeNotifier {
       }
     };
     _sseService!.onAudio = (chunk) {
-      // #region agent log
-      _dbg('app_state.dart:onAudio', 'onAudio_vl', {
-        'b64_len': chunk.base64Audio.length,
-        'vlTtsAudioStarted_was': _vlTtsAudioStarted,
-      }, hypothesisId: 'H3');
-      // #endregion
       // VL+TTS 模式：首个音频分片到达时初始化播放流
       if (!_vlTtsAudioStarted) {
         _vlTtsAudioStarted = true;
@@ -597,12 +622,6 @@ class AppState extends ChangeNotifier {
       _audioPlayer?.enqueuePcm(chunk.base64Audio);
     };
     _sseService!.onOmniAudio = (chunk) {
-      // #region agent log
-      _dbg('app_state.dart:onOmniAudio', 'onOmniAudio', {
-        'b64_len': chunk.base64Audio.length,
-        'omniAudioStarted_was': _omniAudioStarted,
-      }, hypothesisId: 'H3');
-      // #endregion
       // Omni 模式：首个音频分片到达时初始化播放流
       if (!_omniAudioStarted) {
         _omniAudioStarted = true;
@@ -628,14 +647,6 @@ class AppState extends ChangeNotifier {
       // 服务端已提交音频缓冲，等待响应
     };
     _sseService!.onEnd = (end) {
-      // #region agent log
-      _dbg('app_state.dart:onEnd', 'onEnd_received', {
-        'fullText': end.fullText,
-        'audioSeconds': end.audioSeconds,
-        'totalAudioChunks': end.totalAudioChunks,
-        'aiStatus_before': _aiStatus.toString(),
-      }, hypothesisId: 'H2');
-      // #endregion
       // 取消兜底计时器：end 到了说明推理正常完成
       _cancelInferenceTimeout();
       // 关键：end 事件到达时，把累积的 PCM 立刻刷完播放
@@ -980,7 +991,18 @@ class AppState extends ChangeNotifier {
         baseUrl: backendBaseUrl,
         sessionId: _sessionId,
       );
-      _videoCapture!.init(_cameras);
+      _videoCapture!.init(_cameras).then((_) {
+        // _videoCapture 内部 controller 初始化完成后，把 preview 切过去共享同一份。
+        // 避免在 iOS 上同时持有两个 camera controller（会冲突导致 setFlashMode 异常等）。
+        final cap = _videoCapture?.controller;
+        if (cap != null && cap.value.isInitialized) {
+          try {
+            _cameraController?.dispose();
+          } catch (_) {}
+          _cameraController = cap;
+          notifyListeners();
+        }
+      });
     }
   }
 
@@ -1009,7 +1031,12 @@ class AppState extends ChangeNotifier {
     required Size previewSize,
     required Rect renderRect,
   }) async {
-    if (_aiStatus == AiStatus.listening) return;
+    // 摄像头对焦与 AI 交互状态无关 —— 用户在 listening/speaking 状态时
+    // 也常常需要点屏幕换对焦点（尤其近物/失焦场景），所以这里不再做状态拦截。
+    debugPrint(
+      '[Focus] focusAt entered: screen=$screenPoint previewSize=$previewSize '
+      'renderRect=$renderRect aiStatus=$_aiStatus videoCapture=${_videoCapture != null}',
+    );
     _focusPoint = screenPoint;
     notifyListeners();
     await _videoCapture?.setFocusPoint(
@@ -1029,7 +1056,11 @@ class AppState extends ChangeNotifier {
   void toggleFlash() {
     if (_aiStatus == AiStatus.listening) return;
     _flashOn = !_flashOn;
-    _cameraController?.setFlashMode(_flashOn ? FlashMode.torch : FlashMode.off);
+    // 走 _videoCapture：它内部已经包了 switchCamera 会同步切换的 controller，
+    // 且 setFlash() 自带 try/catch + 设备不支持 torch 时静默忽略。
+    // 旧的 _cameraController 路径在切到前置后会抛 setFlashModeFailed（前置无 torch），
+    // 那个异常没被捕获会直接 unhandled，导致 UI 卡死。
+    _videoCapture?.setFlash(_flashOn);
     notifyListeners();
   }
 
@@ -1038,6 +1069,14 @@ class AppState extends ChangeNotifier {
     await _videoCapture?.switchCamera(_cameras);
     // 切换摄像头后同步对焦模式
     await _videoCapture?.setAutoFocus(_autoFocus);
+    // 修复「预览不跟拍反转」：预览用的 _cameraController 必须跟着重建，
+    // 否则用户看到的画面不会翻面，反馈不直观。
+    // 复用 _videoCapture 内部的 controller（同一份 high 分辨率实例），
+    // 避免再多开一个摄像头（iOS 不允许同时打开两个同 sensor）。
+    try {
+      await _cameraController?.dispose();
+    } catch (_) {}
+    _cameraController = _videoCapture?.controller;
     notifyListeners();
   }
 
@@ -1648,7 +1687,13 @@ class AppState extends ChangeNotifier {
     _tripoService?.dispose();
     _marketplaceService?.dispose();
     _infoMessages.close();
-    _cameraController?.dispose();
+    // 注意：现在 _cameraController 可能是 _videoCapture.controller 的同一份实例。
+    // _videoCapture.dispose() 已经在 super.dispose 之前调过，二次 dispose 会抛。
+    // 防御性吞掉异常；正常 dispose 流程中此处引用通常已被置 null。
+    try {
+      _cameraController?.dispose();
+    } catch (_) {}
+    _cameraController = null;
     super.dispose();
   }
 }
