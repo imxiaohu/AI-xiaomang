@@ -25,9 +25,55 @@
 
 ---
 
+## 📸 应用截图
+
+> 全部截图来自 iOS 真机运行（iOS 16+，arm64）
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <b>💬 主对话界面</b><br>
+      <em>摄像头预览 + 状态球动效 + 麦克风交互</em><br><br>
+      <img src="images/IMG_1061.PNG" alt="主对话界面" width="320"/>
+    </td>
+    <td align="center" width="50%">
+      <b>🤖 AI 状态动效</b><br>
+      <em>2D / 3D 球体四态切换 + 音量联动</em><br><br>
+      <img src="images/IMG_1062.PNG" alt="AI 状态动效" width="320"/>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <b>🎨 3D 形象生成</b><br>
+      <em>阿里云 Tripo 文生 / 单图 / 多图</em><br><br>
+      <img src="images/IMG_1063.PNG" alt="3D 形象生成" width="320"/>
+    </td>
+    <td align="center">
+      <b>🛒 形象市场</b><br>
+      <em>公开 / 不公开 / 私密可见性管理</em><br><br>
+      <img src="images/IMG_1064.PNG" alt="形象市场" width="320"/>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <b>⚙️ 设置中心</b><br>
+      <em>后端地址 / 鉴权令牌 / 运行模式 / TTS 偏好</em><br><br>
+      <img src="images/IMG_1065.PNG" alt="设置中心" width="320"/>
+    </td>
+    <td align="center">
+      <b>📷 详细演示</b><br>
+      <em>实时视觉理解 + 语音流式播报</em><br><br>
+      <img src="images/IMG_1066.PNG" alt="详细演示" width="320"/>
+    </td>
+  </tr>
+</table>
+
+---
+
 ## 📑 目录
 
 - [🌟 项目简介](#-项目简介)
+- [📸 应用截图](#-应用截图)
 - [✨ 核心特性](#-核心特性)
 - [🎯 三种运行模式](#-三种运行模式)
 - [🏗️ 技术架构](#️-技术架构)
