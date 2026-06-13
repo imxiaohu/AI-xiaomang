@@ -20,6 +20,13 @@ class BackendConfig {
   static const String endTurnPath = '/upload/chat/end';
   static const String inferPath = '/chat/infer';
 
+  /// Tripo 3D生成 endpoint 路径
+  static const String tripoTextTo3DPath = '/tripo/text-to-3d';
+  static const String tripoImageTo3DPath = '/tripo/image-to-3d';
+  static const String tripoStatusPath = '/tripo/status';
+  static const String tripoGlbPath = '/tripo/model';
+  static const String tripoPreviewPath = '/tripo/model';
+
   /// 连接参数
   static const String defaultToken = 'dev_token';
 }

@@ -33,9 +33,7 @@ async def upload_audio_chunk(body: AudioChunkBody):
     接收Flutter上传的音频分片（base64 PCM）
     并写入对应会话的音频缓冲区
     """
-    session = await session_manager.get(body.ctxId)
-    if not session:
-        raise HTTPException(status_code=404, detail="会话不存在")
+    session = await session_manager.get_or_create(body.ctxId)
 
     if body.audio:
         session.audio_buffer.append(body.audio)
@@ -54,9 +52,7 @@ async def upload_frame(body: FrameBody):
     接收Flutter上传的图像帧（base64 JPG）
     存入会话的最近帧缓冲区，供VL推理或Omni推理使用
     """
-    session = await session_manager.get(body.ctxId)
-    if not session:
-        raise HTTPException(status_code=404, detail="会话不存在")
+    session = await session_manager.get_or_create(body.ctxId)
 
     session.frame_buffer.append({
         "frame": body.frame,
@@ -76,9 +72,7 @@ async def end_turn(body: EndTurnBody):
     - 分离模式（OMNI_MODE=false）：调用 VL+TTS 分离推理流水线，
       流式文本+MP3 通过 SSE 推送
     """
-    session = await session_manager.get(body.ctxId)
-    if not session:
-        raise HTTPException(status_code=404, detail="会话不存在")
+    session = await session_manager.get_or_create(body.ctxId)
 
     session.turn_active = True
     session.touch()

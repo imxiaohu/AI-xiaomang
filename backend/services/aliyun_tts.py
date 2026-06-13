@@ -116,7 +116,7 @@ class AliyunTTS:
 
         mp3_buffer = b""
 
-        async with websockets.connect(url, extra_headers=headers, ping_interval=30) as ws:
+        async with websockets.connect(url, additional_headers=headers, ping_interval=30) as ws:
             await ws.send(json.dumps({
                 "type": "session.update",
                 "session": {
@@ -215,7 +215,7 @@ class AliyunTTS:
 
     async def _wait_for(self, event_type: str, ws, timeout: float = 10.0):
         """等待特定类型的消息"""
-        loop = asyncio.get_running_loop()
+        loop = asyncio.get_event_loop()
         end_time = loop.time() + timeout
         async for raw in ws:
             if isinstance(raw, bytes):
@@ -257,9 +257,7 @@ class TTSStreamContext:
         self._session_started = False
         self._closed = False
         self._task: asyncio.Task | None = None
-        # 真实音频时长（从 TTS 响应提取，精确）
-        self._total_audio_seconds = 0.0
-        # 字符数（用于 fallback 估算：字符数 * 0.3）
+        # 累积估算使用量
         self._total_chars = 0
 
     async def connect(self):
@@ -268,8 +266,7 @@ class TTSStreamContext:
         headers = {"Authorization": f"Bearer {self._api_key}"}
 
         self._ws = await websockets.connect(
-            url, extra_headers=headers, ping_interval=30,
-            open_timeout=10, close_timeout=5,
+            url, additional_headers=headers, ping_interval=30
         )
         self._connected = True
 
@@ -401,10 +398,6 @@ class TTSStreamContext:
                 if msg_type == "content":
                     audio_data = msg.get("audio", {})
                     data_b64 = audio_data.get("data", "")
-                    # 从 TTS 响应中提取真实音频时长（秒）
-                    audio_duration = audio_data.get("duration", 0.0)
-                    if audio_duration > 0:
-                        self._total_audio_seconds += audio_duration
                     if data_b64:
                         chunk_bytes = base64.b64decode(data_b64)
                         if chunk_bytes:
@@ -445,19 +438,16 @@ class TTSStreamContext:
         except Exception as e:
             print(f"[AliyunTTS] Recv loop error: {e}")
         finally:
-            # 使用真实音频时长更新配额（优先）或 fallback 估算
+            # 估算使用量
             global _daily_tts_usage
-            if self._total_audio_seconds > 0:
-                _daily_tts_usage += self._total_audio_seconds
-            else:
-                _daily_tts_usage += self._total_chars * 0.3
+            _daily_tts_usage += self._total_chars * 0.3
 
     async def _wait_for(self, event_type: str, timeout: float = 10.0):
         """等待特定类型的消息"""
         if self._ws is None:
             return None
 
-        loop = asyncio.get_running_loop()
+        loop = asyncio.get_event_loop()
         end_time = loop.time() + timeout
 
         async for raw in self._ws:

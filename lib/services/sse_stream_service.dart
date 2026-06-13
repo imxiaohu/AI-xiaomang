@@ -37,6 +37,12 @@ class SseStreamService {
   VoidCallback? onConnected;
   VoidCallback? onDisconnected;
 
+  // Omni 模式 VAD 事件回调
+  VoidCallback? onOmniSpeechStarted;
+  VoidCallback? onOmniSpeechStopped;
+  VoidCallback? onOmniCommitted;
+  SseAudioCallback? onOmniAudio; // Omni PCM 24kHz stereo
+
   SseStreamService({
     required this.baseUrl,
     required this.sessionId,
@@ -150,6 +156,32 @@ class SseStreamService {
         final json = jsonDecode(eventData) as Map<String, dynamic>;
         onQuotaExceeded?.call(SseQuotaExceeded(
           reason: json['reason'] as String? ?? 'Quota exceeded',
+        ));
+        break;
+      // Omni 模式 VAD 事件
+      case 'omni_speech_started':
+        onOmniSpeechStarted?.call();
+        break;
+      case 'omni_speech_stopped':
+        onOmniSpeechStopped?.call();
+        break;
+      case 'omni_committed':
+        onOmniCommitted?.call();
+        break;
+      // Omni 音频流（PCM 24kHz stereo）
+      case 'omni_audio':
+        final json = jsonDecode(eventData) as Map<String, dynamic>;
+        onOmniAudio?.call(SseAudioChunk(
+          base64Audio: json['audio'] as String? ?? '',
+          sampleIndex: json['index'] as int? ?? 0,
+        ));
+        break;
+      case 'end':
+        final json = jsonDecode(eventData) as Map<String, dynamic>;
+        onEnd?.call(SseEnd(
+          fullText: json['full_text'] as String?,
+          totalAudioChunks: json['total_chunks'] as int? ?? 0,
+          audioSeconds: (json['audio_seconds'] as num?)?.toDouble() ?? 0.0,
         ));
         break;
     }

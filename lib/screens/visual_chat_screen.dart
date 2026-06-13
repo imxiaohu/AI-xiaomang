@@ -3,11 +3,12 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:camera/camera.dart';
 import '../providers/app_state.dart';
-import '../widgets/ai_3d_ball.dart';
 import '../widgets/status_bar.dart';
 import '../widgets/bottom_action_bar.dart';
 import '../widgets/chat_panel.dart';
 import '../widgets/camera_placeholder.dart';
+import '../widgets/tripo_model_viewer.dart';
+import '../widgets/tripo_generation_dialog.dart';
 
 /// 主页面：全屏视频 + AI球体 + 底部操作栏 + 对话面板
 class VisualChatScreen extends StatefulWidget {
@@ -81,20 +82,33 @@ class _VisualChatScreenState extends State<VisualChatScreen>
                 ),
               ),
 
-              // === 悬浮AI球体 ===
+              // === 悬浮AI球体 / Tripo 3D模型 ===
               Positioned(
                 top: MediaQuery.of(context).size.height * 0.52,
                 left: 0,
                 right: 0,
-                  child: Center(
-                    child: Ai3DBall(
-                      status: appState.aiStatus,
-                      runMode: appState.runMode,
-                      ttsVolume: appState.ttsVolume,
-                      hardwareInfo: appState.hardwareInfo,
-                    ),
+                child: Center(
+                  child: TripoModelViewer(
+                    modelUrl: _tripoModelUrl(appState),
+                    previewImageUrl: _tripoPreviewUrl(appState),
+                    isGenerating: appState.tripoGenerating,
+                    progress: appState.tripoGenerating ? appState.tripoProgress : null,
+                    statusText: appState.tripoGenerating ? appState.tripoStatusText : null,
+                    aiStatus: appState.aiStatus,
+                    runMode: appState.runMode,
+                    ttsVolume: appState.ttsVolume,
+                    hardwareInfo: appState.hardwareInfo,
                   ),
+                ),
               ),
+
+              // === 3D生成按钮（右下角悬浮）===
+              if (!appState.tripoGenerating)
+                Positioned(
+                  bottom: MediaQuery.of(context).size.height * 0.20,
+                  right: 16,
+                  child: _buildTripoButton(context, appState),
+                ),
 
               // === 底部操作栏 ===
               Positioned(
@@ -230,5 +244,69 @@ class _VisualChatScreenState extends State<VisualChatScreen>
   double _bottomSafePadding(BuildContext context) {
     final bottom = MediaQuery.of(context).padding.bottom;
     return math.max(bottom, 30.0);
+  }
+
+  /// 生成按钮：右下角悬浮
+  Widget _buildTripoButton(BuildContext context, AppState appState) {
+    return GestureDetector(
+      onTap: () => _showTripoDialog(context, appState),
+      child: Container(
+        width: 48,
+        height: 48,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          gradient: const LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [Color(0xff635bff), Color(0xff8b5cf6)],
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: const Color(0xff635bff).withValues(alpha: 0.4),
+              blurRadius: 12,
+              spreadRadius: 2,
+            ),
+          ],
+        ),
+        child: const Icon(
+          Icons.view_in_ar,
+          color: Colors.white,
+          size: 24,
+        ),
+      ),
+    );
+  }
+
+  void _showTripoDialog(BuildContext context, AppState appState) {
+    showDialog(
+      context: context,
+      builder: (ctx) => TripoGenerationDialog(
+        onSubmit: (input, mode) {
+          switch (mode) {
+            case TripoGenerationMode.textTo3D:
+              appState.startTextTo3D(input);
+              break;
+            case TripoGenerationMode.imageTo3D:
+              appState.startImageTo3D(input);
+              break;
+            case TripoGenerationMode.multiImageTo3D:
+              appState.startMultiImageTo3D(input);
+              break;
+          }
+        },
+      ),
+    );
+  }
+
+  String? _tripoModelUrl(AppState appState) {
+    // 成功后才渲染 GLB 模型
+    if (!appState.tripoSucceeded) return null;
+    return appState.activeGlbUrl;
+  }
+
+  String? _tripoPreviewUrl(AppState appState) {
+    final tid = appState.tripoTaskId;
+    if (tid == null) return null;
+    return appState.activePreviewUrl;
   }
 }

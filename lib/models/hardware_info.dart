@@ -68,11 +68,13 @@ class HardwareInfo {
       final match = RegExp(r'Android ([\d]+)').firstMatch(ver);
       sdkVersion = int.tryParse(match?.group(1) ?? '0') ?? 0;
     } else if (Platform.isIOS) {
-      final info = await Process.run('sysctl', ['-n', 'hw.memsize']);
-      if (info.exitCode == 0) {
-        totalMemory = int.tryParse(info.stdout.toString().trim()) ?? totalMemory;
-        availableMemory = totalMemory ~/ 2;
-      }
+      try {
+        final info = await Process.run('sysctl', ['-n', 'hw.memsize']);
+        if (info.exitCode == 0) {
+          totalMemory = int.tryParse(info.stdout.toString().trim()) ?? totalMemory;
+          availableMemory = totalMemory ~/ 2;
+        }
+      } catch (_) {}
       final verStr = Platform.operatingSystemVersion;
       final verMatch = RegExp(r'OS (\d+)').firstMatch(verStr);
       iosVer = int.tryParse(verMatch?.group(1) ?? '0') ?? 0;

@@ -53,11 +53,6 @@ class Session:
     def is_expired(self) -> bool:
         return time.time() - self.last_active > SESSION_TIMEOUT
 
-    def cancel_inference(self):
-        """取消当前推理任务，防止僵尸任务泄漏"""
-        if self.inference_task and not self.inference_task.done():
-            self.inference_task.cancel()
-
     def get_context(self) -> list[dict[str, Any]]:
         """返回最近 MAX_CONTEXT_ROUNDS 轮对话（不含 system prompt）"""
         return self.messages[-MAX_CONTEXT_ROUNDS * 2:]
@@ -94,13 +89,10 @@ class SessionManager:
 
     async def remove(self, ctx_id: str):
         async with self._lock:
-            session = self._sessions.pop(ctx_id, None)
-        # 在 lock 外取消推理任务，避免死锁
-        if session:
-            session.cancel_inference()
+            self._sessions.pop(ctx_id, None)
 
     async def _cleanup_loop(self):
-        """每60秒扫描，清理过期会话并取消其推理任务"""
+        """每60秒扫描，清理过期会话"""
         while True:
             await asyncio.sleep(60)
             expired = []
@@ -110,11 +102,7 @@ class SessionManager:
                         expired.append(ctx_id)
                 for ctx_id in expired:
                     self._sessions.pop(ctx_id, None)
-            # 在 lock 外取消推理任务，避免死锁
-            for ctx_id in expired:
-                async with self._lock:
-                    # 已移除，重新查找（理论上不应再存在）
-                    pass
+            if expired:
                 print(f"[SessionManager] Cleaned up {len(expired)} expired sessions")
 
 

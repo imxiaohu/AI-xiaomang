@@ -21,8 +21,13 @@ class SseAudioChunk {
 class SseEnd {
   final String? fullText;
   final int totalAudioChunks;
+  final double audioSeconds;
 
-  const SseEnd({this.fullText, required this.totalAudioChunks});
+  const SseEnd({
+    this.fullText,
+    required this.totalAudioChunks,
+    this.audioSeconds = 0.0,
+  });
 }
 
 /// 心跳事件（每3秒一次）

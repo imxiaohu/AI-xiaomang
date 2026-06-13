@@ -1,3 +1,6 @@
+# CDN 源（国内加速）
+source 'https://cdn.cocoapods.org/'
+
 # iOS 最低版本：16.0（支持后台音频、Metal加速推理）
 platform :ios, '26.5'
 

@@ -45,6 +45,59 @@ class AudioPlayerService {
     }
   }
 
+  /// 接收一个base64编码的PCM 24kHz stereo分片，转WAV后加入播放队列
+  /// Omni 模式专用
+  void enqueuePcm(String base64Pcm) {
+    try {
+      final pcmBytes = base64Decode(base64Pcm);
+      final wavBytes = _pcmToWav(pcmBytes);
+      _queue.add(Uint8List.fromList(wavBytes));
+      if (!_isPlaying) {
+        _playNext();
+      }
+    } catch (e) {
+      onError?.call('PCM音频解码失败: $e');
+    }
+  }
+
+  /// PCM 24kHz stereo S16LE → WAV (RIFF header)
+  Uint8List _pcmToWav(Uint8List pcm) {
+    const sampleRate = 24000;
+    const numChannels = 2;
+    const bitsPerSample = 16;
+    final byteRate = sampleRate * numChannels * bitsPerSample ~/ 8;
+    final blockAlign = numChannels * bitsPerSample ~/ 8;
+    final dataSize = pcm.length;
+    final fileSize = 36 + dataSize;
+
+    final wav = ByteData(44 + dataSize);
+    // RIFF header
+    wav.setUint8(0, 0x52); wav.setUint8(1, 0x49); // RIFF
+    wav.setUint8(2, 0x46); wav.setUint8(3, 0x46);
+    wav.setUint32(4, fileSize, Endian.little);
+    wav.setUint8(8, 0x57); wav.setUint8(9, 0x41); // WAVE
+    wav.setUint8(10, 0x56); wav.setUint8(11, 0x45);
+    // fmt subchunk
+    wav.setUint8(12, 0x66); wav.setUint8(13, 0x6D); // fmt
+    wav.setUint8(14, 0x74); wav.setUint8(15, 0x20);
+    wav.setUint32(16, 16, Endian.little);           // subchunk1 size
+    wav.setUint16(20, 1, Endian.little);            // PCM format
+    wav.setUint16(22, numChannels, Endian.little);
+    wav.setUint32(24, sampleRate, Endian.little);
+    wav.setUint32(28, byteRate, Endian.little);
+    wav.setUint16(32, blockAlign, Endian.little);
+    wav.setUint16(34, bitsPerSample, Endian.little);
+    // data subchunk
+    wav.setUint8(36, 0x64); wav.setUint8(37, 0x61); // data
+    wav.setUint8(38, 0x74); wav.setUint8(39, 0x61);
+    wav.setUint32(40, dataSize, Endian.little);
+    // PCM samples
+    for (int i = 0; i < dataSize; i++) {
+      wav.setUint8(44 + i, pcm[i]);
+    }
+    return wav.buffer.asUint8List();
+  }
+
   Future<void> _playNext() async {
     if (_queue.isEmpty) {
       _isPlaying = false;

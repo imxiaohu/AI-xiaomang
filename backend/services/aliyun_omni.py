@@ -75,10 +75,8 @@ class OmniService:
         try:
             async with websockets.connect(
                 self.BASE_URL,
-                extra_headers={"Authorization": f"Bearer {self._api_key}"},
+                additional_headers={"Authorization": f"Bearer {self._api_key}"},
                 ping_interval=20,
-                open_timeout=10,
-                close_timeout=5,
             ) as ws:
                 # ── 1. 配置会话 ───────────────────────────────────
                 await ws.send(json.dumps({

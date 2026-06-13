@@ -4,13 +4,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# 百炼平台 API Key（VL / TTS / ASR / Omni 全量服务共用此 Key）
-# 获取路径：阿里云百炼控制台 → API-KEY 管理
-# 网址：https://bailian.console.aliyun.com/
-DASHSCOPE_API_KEY = os.getenv('DASHSCOPE_API_KEY', '')
-
-# 阿里云区域（百炼服务部署区域）
+# 阿里云凭证
+ALIYUN_ACCESS_KEY_ID = os.getenv('ALIYUN_ACCESS_KEY_ID', '')
+ALIYUN_ACCESS_KEY_SECRET = os.getenv('ALIYUN_ACCESS_KEY_SECRET', '')
 ALIYUN_REGION = os.getenv('ALIYUN_REGION', 'cn-shanghai')
+
+# ASR
+ALIYUN_ASR_APP_KEY = os.getenv('ALIYUN_ASR_APP_KEY', '')
+
+# 通义千问VL
+DASHSCOPE_API_KEY = os.getenv('DASHSCOPE_API_KEY', '')
 
 # 系统提示词（用于显式上下文缓存标记）
 # 占位符 {round} 会替换为当前对话轮次
@@ -18,6 +21,9 @@ SYSTEM_PROMPT = os.getenv(
     'SYSTEM_PROMPT',
     '你是一位多模态AI助手，拥有视觉理解能力。你可以看图说话、回答问题、进行有深度的分析。',
 )
+
+# TTS
+ALIYUN_TTS_APP_KEY = os.getenv('ALIYUN_TTS_APP_KEY', '')
 
 # Qwen-TTS 模型和音色（默认 qwen3-tts-flash-realtime + Cherry）
 # 模型列表：qwen3-tts-flash-realtime / qwen-tts-realtime / qwen3-tts-instruct-flash-realtime
@@ -37,7 +43,12 @@ TTS_VOICE = os.getenv('TTS_VOICE', 'Cherry')
 
 # ── Qwen-Omni-Realtime（一体化实时音视频，OMNI_MODE=true 时启用）─────
 # Omni 模型：qwen3.5-omni-plus-realtime / qwen3.5-omni-flash-realtime
-# Omni 音色：同 TTS_VOICE 音色列表
+# Omni 音色：Cherry(芊悦), Serena(苏瑶), Ethan(晨煦), Chelsie(千雪), Momo(茉兔),
+#           Vivian(十三), Moon(月白), Maia(四月), Kai(凯), Nofish(不吃鱼),
+#           Bella(萌宝), Ryan(甜茶), Katerina(卡捷琳娜), Aiden(艾登),
+#           Eldric Sage(沧明子), Mia(乖小妹), Mochi(沙小弥), Bellona(燕铮莺),
+#           Vincent(田叔), Bunny(萌小姬), Neil(阿闻), Arthur(徐大爷),
+#           Nini(邻家妹妹), Seren(小婉), Pip(顽屁小孩), Stella(少女阿月)
 # 注意：OMNI_MODE=true 时覆盖 VL+TTS 分离模式，Omni 更智能但费用更高
 OMNI_MODE = os.getenv('OMNI_MODE', 'false').lower() == 'true'
 OMNI_MODEL = os.getenv('OMNI_MODEL', 'qwen3.5-omni-flash-realtime')

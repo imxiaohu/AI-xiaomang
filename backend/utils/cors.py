@@ -24,24 +24,19 @@ def validate_session_params(ctx_id: Optional[str], token: Optional[str]) -> tupl
     """
     校验 SSE 连接请求参数。
 
-    安全增强：从长度检查升级为格式校验，
-    token 需为字母/数字/下划线/连字符组成，长度 8-256。
-
     Returns:
         (is_valid, error_message)
     """
-    import re
     if not ctx_id:
         return False, "会话ID不能为空"
 
     if not token:
         return False, "鉴权token不能为空"
 
-    if len(ctx_id) > 128 or not re.fullmatch(r'[\w\-]{1,128}', ctx_id):
+    if len(ctx_id) > 128:
         return False, "会话ID格式非法"
 
-    # token 格式：字母/数字/下划线/连字符，长度 8-256
-    if len(token) < 8 or len(token) > 256 or not re.fullmatch(r'[\w\-]{8,256}', token):
+    if len(token) > 512:
         return False, "token格式非法"
 
     return True, ""

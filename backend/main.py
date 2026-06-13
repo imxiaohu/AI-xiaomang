@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from routers import sse_chat, upload
+from routers import sse_chat, upload, tripo_3d
 from services.session_manager import session_manager
 
 
@@ -40,6 +40,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 # 注册路由
 app.include_router(sse_chat.router)
 app.include_router(upload.router)
+app.include_router(tripo_3d.router)
 
 
 @app.get("/health")

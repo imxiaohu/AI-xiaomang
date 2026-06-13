@@ -11,6 +11,7 @@ import '../services/audio_player_service.dart';
 import '../services/connectivity_service.dart';
 import '../services/offline_ai_engine.dart';
 import '../services/background_audio_service.dart';
+import '../services/tripo_3d_service.dart';
 import '../utils/tts_service.dart';
 import '../config/env_config.dart';
 
@@ -137,6 +138,26 @@ class AppState extends ChangeNotifier {
   String _sessionId = '';
 
   // ==============================
+  // Tripo 3D生成
+  // ==============================
+  TripoService? _tripoService;
+  String? _tripoTaskId;
+  String? _tripoModelUrl;
+  String? _tripoPreviewUrl;
+  bool _tripoGenerating = false;
+  double _tripoProgress = 0.0;
+  String _tripoStatusText = '';
+  String? _tripoError;
+
+  String? get tripoTaskId => _tripoTaskId;
+  String? get tripoModelUrl => _tripoModelUrl;
+  String? get tripoPreviewUrl => _tripoPreviewUrl;
+  bool get tripoGenerating => _tripoGenerating;
+  double get tripoProgress => _tripoProgress;
+  String get tripoStatusText => _tripoStatusText;
+  String? get tripoError => _tripoError;
+
+  // ==============================
   // 初始化
   // ==============================
   bool _disposed = false;
@@ -155,7 +176,6 @@ class AppState extends ChangeNotifier {
 
     // 初始化TTS
     _ttsService = TtsService();
-    _ttsService!.onSpeakComplete = () => goIdle();
     await _ttsService!.init();
 
     // 初始化音频播放器
@@ -181,10 +201,6 @@ class AppState extends ChangeNotifier {
     _offlineEngine = OfflineAIEngine();
     _offlineEngine!.onWhisperResult = (text) {
       debugPrint('[AppState] Whisper result: $text');
-      // 云端模式：Whisper 识别完成后也要显示到 ChatPanel
-      if (_runMode == AppRunMode.cloudAliyun) {
-        addUserMessage(text);
-      }
     };
     _offlineEngine!.onVLResult = (text) {
       debugPrint('[AppState] VL result: $text');
@@ -200,6 +216,10 @@ class AppState extends ChangeNotifier {
     _modelLoaded = _offlineEngine!.isWhisperReady;
     _simulationMode = _offlineEngine!.isSimulationMode;
     _modelLoadProgress = 1.0;
+
+    // 初始化 Tripo 3D服务
+    _initTripo();
+
     notifyListeners();
   }
 
@@ -281,6 +301,18 @@ class AppState extends ChangeNotifier {
     };
     _sseService!.onAudio = (chunk) {
       _audioPlayer?.enqueue(chunk.base64Audio);
+    };
+    _sseService!.onOmniAudio = (chunk) {
+      _audioPlayer?.enqueuePcm(chunk.base64Audio);
+    };
+    _sseService!.onOmniSpeechStarted = () {
+      // Omni VAD 检测到语音开始：可更新 UI 指示器
+    };
+    _sseService!.onOmniSpeechStopped = () {
+      // Omni VAD 检测到语音结束：可更新 UI 指示器
+    };
+    _sseService!.onOmniCommitted = () {
+      // Omni 已提交音频缓冲：可显示"正在思考..."
     };
     _sseService!.onEnd = (end) {
       _resetIdleTimer();
@@ -371,7 +403,6 @@ class AppState extends ChangeNotifier {
       _sseService?.endTurn();
       // 等待SSE推送（thinking状态保持）
       // 用户提问文本在SSE onText -> currentStreamingText -> addAiMessage 中处理
-      // 注意：云端模式下 Whisper 在客户端执行，转写结果在 onWhisperResult 中 addUserMessage
     } else {
       // 离线推理：Whisper ASR + Qwen-VL 视觉理解 + 本地回答
       try {
@@ -425,6 +456,7 @@ class AppState extends ChangeNotifier {
       _backgroundService?.start();
       final lastAiMsg = _messages.lastOrNull;
       if (lastAiMsg != null) {
+        _ttsService?.onSpeakComplete = () => goIdle();
         _ttsService?.speak(lastAiMsg.text);
       }
     }
@@ -548,6 +580,176 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ==============================
+  // Tripo 3D生成
+  // ==============================
+  void _initTripo() {
+    _tripoService = TripoService(baseUrl: BackendConfig.baseUrl);
+    _tripoService!.onProgress = (status, _) {
+      _tripoGenerating = true;
+      switch (status) {
+        case TripoTaskStatus.pending:
+          _tripoStatusText = '任务已提交，等待处理…';
+          _tripoProgress = 0.1;
+          break;
+        case TripoTaskStatus.running:
+          _tripoStatusText = 'AI 正在生成 3D 模型…';
+          _tripoProgress = 0.4;
+          break;
+        case TripoTaskStatus.succeeded:
+          _tripoStatusText = '3D 模型生成成功！';
+          _tripoProgress = 1.0;
+          _tripoGenerating = false;
+          _tripoModelUrl = _tripoService!.lastResult?.pbrModelUrl;
+          _tripoPreviewUrl = _tripoService!.lastResult?.renderedImageUrl;
+          _tripoError = null;
+          break;
+        case TripoTaskStatus.failed:
+          _tripoStatusText = '生成失败，请重试';
+          _tripoGenerating = false;
+          _tripoError = _tripoService!.lastResult?.errorMessage;
+          break;
+        case TripoTaskStatus.canceled:
+          _tripoStatusText = '任务已取消';
+          _tripoGenerating = false;
+          _tripoError = '任务已取消';
+          break;
+        case TripoTaskStatus.unknown:
+          _tripoStatusText = '等待服务器响应…';
+          break;
+      }
+      notifyListeners();
+    };
+    _tripoService!.onError = (error) {
+      _tripoGenerating = false;
+      _tripoError = error;
+      _tripoStatusText = '网络错误：$error';
+      notifyListeners();
+    };
+  }
+
+  Future<void> startTextTo3D(String prompt) async {
+    if (_tripoService == null) return;
+    try {
+      _tripoGenerating = true;
+      _tripoStatusText = '正在提交生成任务…';
+      _tripoProgress = 0.05;
+      _tripoError = null;
+      notifyListeners();
+
+      final taskId = await _tripoService!.textTo3D(prompt: prompt);
+      _tripoTaskId = taskId;
+      _tripoService!.startPolling(taskId);
+    } catch (e) {
+      _tripoGenerating = false;
+      _tripoError = e.toString();
+      _tripoStatusText = '提交失败：$e';
+      notifyListeners();
+    }
+  }
+
+  Future<void> startImageTo3D(String imageUrl) async {
+    if (_tripoService == null) return;
+    try {
+      _tripoGenerating = true;
+      _tripoStatusText = '正在提交生成任务…';
+      _tripoProgress = 0.05;
+      _tripoError = null;
+      notifyListeners();
+
+      final taskId = await _tripoService!.imageTo3D(imageUrl: imageUrl);
+      _tripoTaskId = taskId;
+      _tripoService!.startPolling(taskId);
+    } catch (e) {
+      _tripoGenerating = false;
+      _tripoError = e.toString();
+      _tripoStatusText = '提交失败：$e';
+      notifyListeners();
+    }
+  }
+
+  Future<void> startMultiImageTo3D(String encodedInput) async {
+    if (_tripoService == null) return;
+    try {
+      _tripoGenerating = true;
+      _tripoStatusText = '正在提交生成任务…';
+      _tripoProgress = 0.05;
+      _tripoError = null;
+      notifyListeners();
+
+      // encodedInput 格式: "url1|null|url3|null" (用|分隔，null=禁用/空)
+      final parts = encodedInput.split('|');
+      final images = <Map<String, String>?>[];
+      for (final part in parts) {
+        if (part.isEmpty) {
+          images.add(null); // 用户禁用的视角
+        } else {
+          images.add({'type': _inferImageType(part), 'file_token': part});
+        }
+      }
+      // 不足4个，补null
+      while (images.length < 4) images.add(null);
+
+      final taskId = await _tripoService!.multiImageTo3D(images: images);
+      _tripoTaskId = taskId;
+      _tripoService!.startPolling(taskId);
+    } catch (e) {
+      _tripoGenerating = false;
+      _tripoError = e.toString();
+      _tripoStatusText = '提交失败：$e';
+      notifyListeners();
+    }
+  }
+
+  String _inferImageType(String url) {
+    final u = url.toLowerCase();
+    if (u.contains('.png')) return 'png';
+    return 'jpeg';
+  }
+
+  void clearTripoModel() {
+    _tripoTaskId = null;
+    _tripoModelUrl = null;
+    _tripoPreviewUrl = null;
+    _tripoGenerating = false;
+    _tripoProgress = 0.0;
+    _tripoStatusText = '';
+    _tripoError = null;
+    _tripoService?.cancelPolling();
+    notifyListeners();
+  }
+
+  /// 获取当前活跃 GLB 的完整 URL（优先本地路径，后端下载完成后返回本地路径）
+  String? get activeGlbUrl {
+    final tid = _tripoTaskId;
+    if (tid == null || _tripoService == null) return null;
+    // lastResult.pbrModelUrl 来自后端 /status 接口，后端已做本地/远程降级
+    return _tripoService!.lastResult?.pbrModelUrl ??
+        '${BackendConfig.baseUrl}/tripo/model/$tid/glb';
+  }
+
+  /// 获取当前活跃预览图的完整 URL
+  /// 优先用后端 /status 接口降级后的 URL（本地未就绪时返回远程 rendered_image_url），
+  /// 兜底用本地路径（后端下载完成后可通过此路径访问）
+  String? get activePreviewUrl {
+    final tid = _tripoTaskId;
+    if (tid == null || _tripoService == null) return null;
+    // lastResult.renderedImageUrl 来自后端 /status 接口，已做本地/远程降级
+    return _tripoService!.lastResult?.renderedImageUrl ??
+        _tripoService!.previewUrl(tid);
+  }
+
+  /// 当前模型是否生成成功
+  bool get tripoSucceeded =>
+      _tripoTaskId != null &&
+      _tripoService?.lastResult?.status == TripoTaskStatus.succeeded;
+
+  /// 当前模型 GLB URL（远程或本地）
+  String? get tripoPbrUrl => _tripoService?.lastResult?.pbrModelUrl;
+
+  /// 当前渲染预览图 URL
+  String? get tripoRenderedUrl => _tripoService?.lastResult?.renderedImageUrl;
+
   @override
   void dispose() {
     _disposed = true;
@@ -562,6 +764,7 @@ class AppState extends ChangeNotifier {
     _ttsService?.dispose();
     _offlineEngine?.dispose();
     _backgroundService?.dispose();
+    _tripoService?.dispose();
     _cameraController?.dispose();
     super.dispose();
   }

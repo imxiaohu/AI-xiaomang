@@ -80,8 +80,8 @@ class _ChatPanelState extends State<ChatPanel>
     final screenHeight = MediaQuery.of(context).size.height;
     final panelMaxHeight = screenHeight * 0.45; // 展开时最大高度
 
-    return ListenableBuilder(
-      listenable: _slideAnim,
+    return AnimatedBuilder(
+      animation: _slideAnim,
       builder: (ctx, _) {
         return GestureDetector(
           onVerticalDragUpdate: (details) {
